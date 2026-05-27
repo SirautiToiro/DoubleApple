@@ -1,17 +1,39 @@
 "use client";
-import React, { useState } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import Image from "next/image";
 import { createEditor, BaseEditor, Element, Descendant } from "slate";
-import { Slate, Editable, withReact, ReactEditor } from "slate-react";
+import { Slate, Editable, withReact, ReactEditor, RenderElementProps, RenderLeafProps } from "slate-react";
+import { initHighlightManager } from "./higilightManager";
+import { Leaf, HighlightElement, CodeElement, IsSameElement } from "./elements";
 
 //DoubleApple\node_modules\slate\dist\types\custom-types.d.ts
 //に、型定義ファイルがある
+
+///説明///
+//手動翻訳の支援アプリ。
+//左右のエディタに対応をタグ付けでき、その対応をマウスカーソルを重ねることでハイライトできる
 
 const initialValueLeft: Descendant[] = [
   {
     type: "paragraph",
     hovertag: null,
-    children: [{ text: "左側のエディタです。ここにテキストを入力してください。" }],
+    children: [{ text: "It's a " }],
+  },
+  {
+    type: "paragraph",
+    hovertag: 1,
+    children: [
+      {
+        type: "paragraph",
+        hovertag: 2,
+        children: [{ text: "Test" }],
+      },
+      {
+        type: "paragraph",
+        hovertag: null,
+        children: [{ text: "text" }],
+      },
+    ],
   },
 ];
 
@@ -19,13 +41,32 @@ const initialValueRight: Descendant[] = [
   {
     type: "paragraph",
     hovertag: null,
-    children: [{ text: "右側のエディタです。ここにテキストを入力してください。" }],
+    children: [{ text: "これは" }],
+  },
+  {
+    type: "paragraph",
+    hovertag: 1,
+    children: [
+      {
+        type: "paragraph",
+        hovertag: 2,
+        children: [{ text: "テスト" }],
+      },
+      {
+        type: "paragraph",
+        hovertag: null,
+        children: [{ text: "のテキストです。" }],
+      },
+    ],
   },
 ];
 
 export default function Home() {
   const [editorLeft] = useState(() => withReact(createEditor()));
   const [editorRight] = useState(() => withReact(createEditor()));
+
+  // HighlightManagerの初期化（エディタをキャッシュ）
+  useMemo(() => initHighlightManager(editorLeft, editorRight), [editorLeft, editorRight]);
 
   // フォーカス状態を管理するState
   const [isFocusedLeft, setIsFocusedLeft] = useState(false);
@@ -35,6 +76,17 @@ export default function Home() {
   const COLOR_BLACK = "#000000";
   const COLOR_WHITE = "#FFFFFF";
   const COLOR_BEIGE_WHITE = "#FAF9F5"; // ごく僅かにベージュが混ざった白
+
+  // Define a rendering function based on the element passed to `props`. We use
+  // `useCallback` here to memoize the function for subsequent renders.
+  const renderElement = useCallback((props: RenderElementProps) => {
+    switch (props.element.type) {
+      case "code":
+        return <CodeElement {...props} />;
+      default:
+        return <HighlightElement {...props} />;
+    }
+  }, []);
 
   return (
     <div style={{
@@ -133,6 +185,7 @@ export default function Home() {
                   placeholder="左側のエディタに入力..."
                   onFocus={() => setIsFocusedLeft(true)}
                   onBlur={() => setIsFocusedLeft(false)}
+                  renderElement={renderElement}
                   style={{ flex: 1, height: "100%", outline: "none" }}
                 />
               </Slate>
@@ -206,6 +259,7 @@ export default function Home() {
                   placeholder="右側のエディタに入力..."
                   onFocus={() => setIsFocusedRight(true)}
                   onBlur={() => setIsFocusedRight(false)}
+                  renderElement={renderElement}
                   style={{ flex: 1, height: "100%", outline: "none" }}
                 />
               </Slate>

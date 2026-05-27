@@ -10,14 +10,15 @@ export const HighlightElement = (props: RenderElementProps) => {
   var isHighlighted = (props.element as any).highlighted === true;
 
   const HandleMouseEnter = () => {
+    console.log("HandleMouseEnter", tag);
     if (tag === null) return;
-    highlightManager.AddMouseEnterings(tag);
-    highlightManager.SetHighlighted(editor);
+    highlightManager?.AddMouseEnterings(tag);
+    highlightManager?.SetHighlighted();
   };
   const HandleMouseLeave = () => {
     if (tag === null) return;
-    highlightManager.RemoveMouseEntering(tag);
-    highlightManager.SetHighlighted(editor);
+    highlightManager?.RemoveMouseEntering(tag);
+    highlightManager?.SetHighlighted();
   };
 
   return (

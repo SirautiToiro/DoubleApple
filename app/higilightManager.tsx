@@ -14,23 +14,29 @@ class HighlightManager {
   private mouseEnterings: number[];
   private animationFrameId: number | null = null;
 
-  //hovertagのIDとハイライトされるべき場所のMap
-  private highlightTagMap = new Map<number, Path[]>();
+  //キャッシュされたエディタ参照
+  private leftEditor: Editor;
+  private rightEditor: Editor;
 
-  //前回ハイライトしたパスの記録
-  private lastHighlightedPaths: Path[];
+  //hovertagのIDと{ハイライトされるべき場所,左側のエディタであるかのboolean}のMap
+  private highlightTagMap = new Map<number, { paths: Path; isLeft: boolean }[]>();
+
+  //前回ハイライトしたパスの記録（どちらのエディタかも保持）
+  private lastHighlightedPaths: { path: Path; isLeft: boolean }[];
 
   // コンストラクタ
-  constructor() {
+  constructor(leftEditor: Editor, rightEditor: Editor) {
     this.mouseEnterings = [];
     this.lastHighlightedPaths = [];
+    this.leftEditor = leftEditor;
+    this.rightEditor = rightEditor;
     console.log("start");
 
     // highlightTagMap の仮データ初期化
     // 1 -> Path [1] (親要素)
-    // 2 -> Path [1, 0] (子要素)
-    this.highlightTagMap.set(1, [[1]]);
-    this.highlightTagMap.set(2, [[1, 0]]);
+    // 2 -> Path [1, 0] (子要素)  
+    this.highlightTagMap.set(1, [{ paths: [1], isLeft: true }, { paths: [1], isLeft: false }]);
+    this.highlightTagMap.set(2, [{ paths: [1, 0], isLeft: true }, { paths: [1, 0], isLeft: false }]);
   }
 
   AddMouseEnterings = (tag: number) => {
@@ -54,7 +60,7 @@ class HighlightManager {
   RemoveMouseEnterings = this.RemoveMouseEntering;
 
   //ハイライトのオンオフを調節する
-  SetHighlighted = (editor: Editor) => {
+  SetHighlighted = () => {
     // すでに予約されているアニメーションフレームがあればキャンセル（デバウンス）
     if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId);
@@ -66,7 +72,8 @@ class HighlightManager {
 
       // 1. 前回のハイライトをクリアする
       if (this.lastHighlightedPaths.length > 0) {
-        this.lastHighlightedPaths.forEach((path) => {
+        this.lastHighlightedPaths.forEach(({ path, isLeft }) => {
+          const editor = isLeft ? this.leftEditor : this.rightEditor;
           if (Editor.hasPath(editor, path)) {
             Transforms.setNodes(editor, { highlighted: false } as any, {
               at: path,
@@ -84,9 +91,9 @@ class HighlightManager {
       let maxDepth = -1;
 
       for (const tag of this.mouseEnterings) {
-        const paths = this.highlightTagMap.get(tag);
-        if (paths && paths.length > 0) {
-          const depth = Math.max(...paths.map((p) => p.length));
+        const entries = this.highlightTagMap.get(tag);
+        if (entries && entries.length > 0) {
+          const depth = Math.max(...entries.map((e) => e.paths.length));
           if (depth >= maxDepth) {
             maxDepth = depth;
             targetTag = tag;
@@ -94,15 +101,16 @@ class HighlightManager {
         }
       }
 
-      // 4. highlightTagMapから対応するPath[]を取得し、それに対応するDOM要素をハイライトする
-      const paths = this.highlightTagMap.get(targetTag);
-      if (paths) {
-        paths.forEach((path) => {
-          if (Editor.hasPath(editor, path)) {
+      // 4. highlightTagMapから対応するエントリ配列を取得し、各エントリごとに適切なエディタでハイライトする
+      const entries = this.highlightTagMap.get(targetTag);
+      if (entries) {
+        entries.forEach(({ paths, isLeft }) => {
+          const editor = isLeft ? this.leftEditor : this.rightEditor;
+          if (Editor.hasPath(editor, paths)) {
             Transforms.setNodes(editor, { highlighted: true } as any, {
-              at: path,
+              at: paths,
             });
-            this.lastHighlightedPaths.push(path);
+            this.lastHighlightedPaths.push({ path: paths, isLeft });
           }
         });
       }
@@ -112,7 +120,15 @@ class HighlightManager {
   };
 }
 
-export const highlightManager = new HighlightManager();
+// モジュールレベルのインスタンス（page.tsxからinitHighlightManagerで初期化される）
+let highlightManager: HighlightManager | null = null;
+
+export function initHighlightManager(leftEditor: Editor, rightEditor: Editor): HighlightManager {
+  highlightManager = new HighlightManager(leftEditor, rightEditor);
+  return highlightManager;
+}
+
+export { HighlightManager, highlightManager };
 
 // //マウスが重なっているものの一覧を管理するリスト
 // let mouseEnterings: string[] = [];
