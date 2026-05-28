@@ -5,18 +5,16 @@ import styles from "./page.module.css";
 
 //カーソルを重ねるとハイライトを提供する
 export const HighlightElement = (props: RenderElementProps) => {
-  const editor = useSlateStatic();
   var tag = props.element.hovertag;
-  var isHighlighted = (props.element as any).highlighted === true;
 
   const HandleMouseEnter = () => {
     console.log("HandleMouseEnter", tag);
-    if (tag === null) return;
+    if (tag === null || tag === undefined) return;
     highlightManager?.AddMouseEnterings(tag);
     highlightManager?.SetHighlighted();
   };
   const HandleMouseLeave = () => {
-    if (tag === null) return;
+    if (tag === null || tag === undefined) return;
     highlightManager?.RemoveMouseEntering(tag);
     highlightManager?.SetHighlighted();
   };
@@ -24,10 +22,10 @@ export const HighlightElement = (props: RenderElementProps) => {
   return (
     <span
       {...props.attributes}
+      data-hovertag={tag}
       onMouseEnter={HandleMouseEnter}
       onMouseLeave={HandleMouseLeave}
-      //Pathであるタグが文字列化したものがclassNameに追加される
-      className={`${tag?.toString() ?? ""} ${isHighlighted ? styles.highlighted : ""}`}
+      className={tag?.toString() ?? ""}
     >
       {props.children}
     </span>

@@ -15,23 +15,24 @@ import { Leaf, HighlightElement, CodeElement, IsSameElement } from "./elements";
 
 const initialValueLeft: Descendant[] = [
   {
-    type: "paragraph",
-    hovertag: null,
-    children: [{ text: "It's a " }],
-  },
-  {
-    type: "paragraph",
-    hovertag: 1,
+    type: "block",
     children: [
+      { text: "It's a " },
       {
-        type: "paragraph",
-        hovertag: 2,
-        children: [{ text: "Test" }],
-      },
-      {
-        type: "paragraph",
-        hovertag: null,
-        children: [{ text: "text" }],
+        type: "inline",
+        hovertag: 1,
+        children: [
+          {
+            type: "inline",
+            hovertag: 2,
+            children: [{ text: "test" }],
+          },
+          {
+            type: "inline",
+            hovertag: null,
+            children: [{ text: "text" }],
+          },
+        ],
       },
     ],
   },
@@ -39,31 +40,46 @@ const initialValueLeft: Descendant[] = [
 
 const initialValueRight: Descendant[] = [
   {
-    type: "paragraph",
-    hovertag: null,
-    children: [{ text: "これは" }],
-  },
-  {
-    type: "paragraph",
-    hovertag: 1,
+    type: "block",
     children: [
+      { text: "これは" },
       {
-        type: "paragraph",
-        hovertag: 2,
-        children: [{ text: "テスト" }],
-      },
-      {
-        type: "paragraph",
-        hovertag: null,
-        children: [{ text: "のテキストです。" }],
+        type: "inline",
+        hovertag: 1,
+        children: [
+          {
+            type: "inline",
+            hovertag: 2,
+            children: [{ text: "テスト" }],
+          },
+          {
+            type: "inline",
+            hovertag: null,
+            children: [{ text: "テキストです。" }],
+          },
+        ],
       },
     ],
   },
 ];
 
 export default function Home() {
-  const [editorLeft] = useState(() => withReact(createEditor()));
-  const [editorRight] = useState(() => withReact(createEditor()));
+  const [editorLeft] = useState(() => {
+    const editor = withReact(createEditor());
+    const { isInline } = editor;
+    editor.isInline = (element: any) => {
+      return element.type === "inline" ? true : isInline(element);
+    };
+    return editor;
+  });
+  const [editorRight] = useState(() => {
+    const editor = withReact(createEditor());
+    const { isInline } = editor;
+    editor.isInline = (element: any) => {
+      return element.type === "inline" ? true : isInline(element);
+    };
+    return editor;
+  });
 
   // HighlightManagerの初期化（エディタをキャッシュ）
   useMemo(() => initHighlightManager(editorLeft, editorRight), [editorLeft, editorRight]);
@@ -83,8 +99,18 @@ export default function Home() {
     switch (props.element.type) {
       case "code":
         return <CodeElement {...props} />;
+      case "block":
+        return <div {...props.attributes}>{props.children}</div>;
       default:
         return <HighlightElement {...props} />;
+    }
+  }, []);
+
+  // エンターキー入力時に改行文字を挿入するハンドラー
+  const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>, editor: ReactEditor & BaseEditor) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      editor.insertText("\n");
     }
   }, []);
 
@@ -185,6 +211,7 @@ export default function Home() {
                   placeholder="左側のエディタに入力..."
                   onFocus={() => setIsFocusedLeft(true)}
                   onBlur={() => setIsFocusedLeft(false)}
+                  onKeyDown={(event) => handleKeyDown(event, editorLeft)}
                   renderElement={renderElement}
                   style={{ flex: 1, height: "100%", outline: "none" }}
                 />
@@ -259,6 +286,7 @@ export default function Home() {
                   placeholder="右側のエディタに入力..."
                   onFocus={() => setIsFocusedRight(true)}
                   onBlur={() => setIsFocusedRight(false)}
+                  onKeyDown={(event) => handleKeyDown(event, editorRight)}
                   renderElement={renderElement}
                   style={{ flex: 1, height: "100%", outline: "none" }}
                 />

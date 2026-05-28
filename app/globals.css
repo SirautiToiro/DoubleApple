@@ -1,1 +1,13 @@
+@import "tailwindcss";
 
+body {
+    /* フォントの適用と、小説・学術書が読みやすくなる行間・文字間の調整 */
+    font-family: var(--font-bizUdpMincho), serif;
+    line-height: 1.8;
+    /* 小説や論文に最適な、少し広めの行間 */
+    letter-spacing: 0.03em;
+    /* 文字同士が詰まりすぎないように調整 */
+    color: #1a1a1a;
+    /* 純粋な黒(#000)より、わずかに優しい墨色にすることで目を疲れにくくします */
+    white-space: pre-wrap;
+}
