@@ -2,18 +2,23 @@ import { highlightManager } from "./higilightManager";
 import { Editor, Transforms, Element, Range } from "slate";
 import { RenderElementProps, RenderLeafProps, ReactEditor, useSlateStatic } from "slate-react";
 import styles from "./page.module.css";
+import React, { useContext } from "react";
+import { ModeContext } from "./modeContext";
 
 //カーソルを重ねるとハイライトを提供する
 export const HighlightElement = (props: RenderElementProps) => {
   var tag = props.element.hovertag;
+  const mode = useContext(ModeContext);
 
   const HandleMouseEnter = () => {
+    if (mode !== "confirm") return;
     console.log("HandleMouseEnter", tag);
     if (tag === null || tag === undefined) return;
     highlightManager?.AddMouseEnterings(tag);
     highlightManager?.SetHighlighted();
   };
   const HandleMouseLeave = () => {
+    if (mode !== "confirm") return;
     if (tag === null || tag === undefined) return;
     highlightManager?.RemoveMouseEntering(tag);
     highlightManager?.SetHighlighted();
@@ -42,10 +47,15 @@ export const CodeElement = (props: RenderElementProps) => {
 
 // Define a React component to render leaves with bold text.
 export const Leaf = (props: RenderLeafProps) => {
+  const style: React.CSSProperties = {
+    fontWeight: props.leaf.bold ? "bold" : "normal",
+    backgroundColor: (props.leaf as any).insertHighlight ? "#5b8f2aff" : undefined,
+    color: (props.leaf as any).insertHighlight ? "#FFFFFF" : undefined,
+  };
   return (
     <span
       {...props.attributes}
-      style={{ fontWeight: props.leaf.bold ? "bold" : "normal" }}
+      style={style}
     >
       {props.children}
     </span>

@@ -66,6 +66,18 @@ class HighlightManager {
       });
     });
   };
+
+  ClearHighlight = () => {
+    this.mouseEnterings = [];
+    if (this.animationFrameId !== null) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+    const oldHighlights = document.querySelectorAll(`.${styles.highlighted}`);
+    oldHighlights.forEach((el) => {
+      el.classList.remove(styles.highlighted);
+    });
+  };
 }
 
 // モジュールレベルのインスタンス（page.tsxからinitHighlightManagerで初期化される）
