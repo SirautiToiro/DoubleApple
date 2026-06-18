@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import Image from "next/image";
-import { createEditor, BaseEditor, Element, Descendant, Editor, Transforms, Range } from "slate";
+import { createEditor, BaseEditor, Element, Descendant, Editor, Transforms, Range, Text, Node, NodeEntry, Path, Point } from "slate";
 import { Slate, Editable, withReact, ReactEditor, RenderElementProps, RenderLeafProps } from "slate-react";
 import { initHighlightManager, highlightManager } from "./higilightManager";
 import { Leaf, HighlightElement, CodeElement, IsSameElement } from "./elements";
@@ -13,6 +13,136 @@ import { Mode, ModeContext } from "./modeContext";
 ///説明///
 //手動翻訳の支援アプリ。
 //左右のエディタに対応をタグ付けでき、その対応をマウスカーソルを重ねることでハイライトできる
+
+// ─── ヘルパー関数（コンポーネント外） ────────────────────────────────────────
+
+/** insertHighlight が付いたテキストノードの範囲情報を返す。なければ null。 */
+function getInsertHighlightRange(editor: Editor): {
+  sorted: Path[];
+  selectionStart: Point;
+  selectionEnd: Point;
+} | null {
+  const paths: Path[] = [];
+  for (const [node, path] of Node.nodes(editor)) {
+    if (Text.isText(node) && (node as any).insertHighlight) {
+      paths.push(path);
+    }
+  }
+  if (paths.length === 0) return null;
+  const sorted = [...paths].sort(Path.compare);
+  return {
+    sorted,
+    selectionStart: Editor.start(editor, sorted[0]),
+    selectionEnd: Editor.end(editor, sorted[sorted.length - 1]),
+  };
+}
+
+/**
+ * hovertag グループを A・B・C に分類して返す。
+ *   A: グループ範囲が選択範囲に完全に内包される
+ *   B: グループ範囲が選択範囲を完全に内包する
+ *   C: 一部のみ重なる（拡張 or エラー対象）
+ * hovertag: null のノードは typeof 判定で除外される。
+ */
+function classifyHovertagGroups(
+  editor: Editor,
+  selectionStart: Point,
+  selectionEnd: Point
+): {
+  classA: number[];
+  classB: number[];
+  classC: number[];
+  groups: Map<number, Path[]>;
+} {
+  const groups = new Map<number, Path[]>();
+  for (const [node, path] of Node.nodes(editor)) {
+    if (Element.isElement(node) && typeof (node as any).hovertag === "number") {
+      const tag = (node as any).hovertag as number;
+      if (!groups.has(tag)) groups.set(tag, []);
+      groups.get(tag)!.push(path);
+    }
+  }
+
+  const classA: number[] = [];
+  const classB: number[] = [];
+  const classC: number[] = [];
+
+  for (const [tag, paths] of groups) {
+    const sp = [...paths].sort(Path.compare);
+    const gStart = Editor.start(editor, sp[0]);
+    const gEnd   = Editor.end(editor, sp[sp.length - 1]);
+
+    // 重なりなし → スキップ
+    if (Point.isAfter(gStart, selectionEnd) || Point.isBefore(gEnd, selectionStart)) continue;
+
+    // B: グループ範囲が選択範囲を完全に内包する
+    const isB = !Point.isAfter(gStart, selectionStart) && !Point.isBefore(gEnd, selectionEnd);
+    // A: グループ範囲が選択範囲に完全に内包される
+    const isA = !Point.isBefore(gStart, selectionStart) && !Point.isAfter(gEnd, selectionEnd);
+
+    if (isB) classB.push(tag);
+    else if (isA) classA.push(tag);
+    else classC.push(tag);
+  }
+
+  return { classA, classB, classC, groups };
+}
+
+/**
+ * 分類済みの情報をもとに、insertHighlight のテキスト範囲を
+ * hovertag inline ノードに変換する。
+ * wrapNodes は Range が収まる最内の共通親（最内 B ノード）の中に
+ * 自動的に新ノードを配置し、A ノードを子として内包する
+ */
+function applyHighlightTransform(
+  editor: Editor,
+  newHoverTag: number
+): void {
+  const rangeInfo = getInsertHighlightRange(editor);
+  if (!rangeInfo) return;
+
+  const { selectionStart } = rangeInfo;
+
+  Editor.withoutNormalizing(editor, () => {
+    // 1. selectionStart の位置でインラインノードを分割
+    Transforms.splitNodes(editor, {
+      at: selectionStart,
+      match: (n) => Element.isElement(n) && editor.isInline(n),
+      always: false,
+    });
+
+    // 2. 分割によりパスが変わった可能性があるため、最新の範囲を再取得
+    let tempRangeInfo = getInsertHighlightRange(editor);
+    if (!tempRangeInfo) return;
+
+    // 3. selectionEnd の位置でインラインノードを分割
+    Transforms.splitNodes(editor, {
+      at: tempRangeInfo.selectionEnd,
+      match: (n) => Element.isElement(n) && editor.isInline(n),
+      always: false,
+    });
+
+    // 4. 再度、最新の範囲を取得
+    const newRangeInfo = getInsertHighlightRange(editor);
+    if (!newRangeInfo) return;
+
+    const { sorted: newSorted, selectionStart: newStart, selectionEnd: newEnd } = newRangeInfo;
+
+    // 5. insertHighlight マークを除去
+    for (const p of [...newSorted].reverse()) {
+      Transforms.unsetNodes(editor, "insertHighlight", { at: p });
+    }
+
+    // 6. 新要素でラップする
+    Transforms.wrapNodes(
+      editor,
+      { type: "inline", hovertag: newHoverTag, children: [] } as any,
+      { at: { anchor: newStart, focus: newEnd } }
+    );
+  });
+}
+
+// ─── 初期値 ────────────────────────────────────────────────────────────────
 
 const initialValueLeft: Descendant[] = [
   {
@@ -27,6 +157,11 @@ const initialValueLeft: Descendant[] = [
             type: "inline",
             hovertag: 2,
             children: [{ text: "test" }],
+          },
+          {
+            type: "inline",
+            hovertag: 3,
+            children: [{ text: "word" }],
           },
           {
             type: "inline",
@@ -55,6 +190,11 @@ const initialValueRight: Descendant[] = [
           },
           {
             type: "inline",
+            hovertag: 3,
+            children: [{ text: "単語" }],
+          },
+          {
+            type: "inline",
             hovertag: null,
             children: [{ text: "テキストです。" }],
           },
@@ -67,6 +207,15 @@ const initialValueRight: Descendant[] = [
 export default function Home() {
   const [mode, setMode] = useState<Mode>("edit");
   const lastActiveMode = useRef<"edit" | "confirm">("edit");
+
+  // トースト通知
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((msg: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToastMessage(msg);
+    toastTimerRef.current = setTimeout(() => setToastMessage(null), 3000);
+  }, []);
 
   useEffect(() => {
     const handleGlobalKeyDown = (event: KeyboardEvent) => {
@@ -94,6 +243,11 @@ export default function Home() {
             const next: "edit" | "confirm" = "edit";
             lastActiveMode.current = next;
             return next;
+          } else if (prev === "insert") {
+            // insert モードからは confirm モードへ遷移
+            const next: "edit" | "confirm" = "confirm";
+            lastActiveMode.current = next;
+            return next;
           }
           return prev;
         });
@@ -112,6 +266,8 @@ export default function Home() {
       highlightManager?.ClearHighlight();
     }
   }, [mode]);
+
+
 
   const handleMouseUp = useCallback((editor: ReactEditor & BaseEditor) => {
     if (mode !== "insert") return;
@@ -149,6 +305,24 @@ export default function Home() {
   // HighlightManagerの初期化（エディタをキャッシュ）
   useMemo(() => initHighlightManager(editorLeft, editorRight), [editorLeft, editorRight]);
 
+  // modeがinsertから他の状態に遷移したとき、insertHighlightマークをすべて破棄
+  const prevMode = useRef<Mode>(mode);
+  useEffect(() => {
+    if (prevMode.current === "insert" && mode !== "insert") {
+      // 両エディタのすべてのテキストノードからinsertHighlightを除去
+      for (const editor of [editorLeft, editorRight]) {
+        Editor.withoutNormalizing(editor, () => {
+          for (const [node, path] of Node.nodes(editor)) {
+            if (Text.isText(node) && (node as any).insertHighlight) {
+              Transforms.unsetNodes(editor, "insertHighlight", { at: path });
+            }
+          }
+        });
+      }
+    }
+    prevMode.current = mode;
+  }, [mode, editorLeft, editorRight]);
+
   // フォーカス状態を管理するState
   const [isFocusedLeft, setIsFocusedLeft] = useState(false);
   const [isFocusedRight, setIsFocusedRight] = useState(false);
@@ -183,14 +357,65 @@ export default function Home() {
         "Home", "End", "PageUp", "PageDown",
       ];
       const isCmdOrCtrl = event.metaKey || event.ctrlKey;
-      
+
       // Ctrl+C などのコピー操作は許可
       if (isCmdOrCtrl && (event.key === "c" || event.key === "C")) {
         return;
       }
-      
+
       // モード切り替え用のキー（Tab, Ctrl+Q）は許可
       if (event.key === "Tab" || (isCmdOrCtrl && (event.key === "q" || event.key === "Q"))) {
+        return;
+      }
+
+      // insert モード中の Ctrl+Enter: insertHighlight を hovertag inline ノードに変換
+      if (mode === "insert" && isCmdOrCtrl && event.key === "Enter") {
+        event.preventDefault();
+
+        // 左右エディタ全体から最大 hovertag を取得し +1 を新タグとする
+        let maxTag = 0;
+        for (const targetEditor of [editorLeft, editorRight]) {
+          for (const [node] of Node.nodes(targetEditor)) {
+            if (Element.isElement(node) && typeof (node as any).hovertag === "number") {
+              const tag = (node as any).hovertag as number;
+              if (tag > maxTag) maxTag = tag;
+            }
+          }
+        }
+        const newHoverTag = maxTag + 1;
+
+        // 両エディタの insertHighlight 範囲を取得
+        const rangeLeft  = getInsertHighlightRange(editorLeft);
+        const rangeRight = getInsertHighlightRange(editorRight);
+        if (!rangeLeft && !rangeRight) return;
+
+        // 両エディタを A/B/C 分類
+        const emptyClassification = {
+          classA: [] as number[],
+          classB: [] as number[],
+          classC: [] as number[],
+          groups: new Map<number, Path[]>(),
+        };
+        const clLeft  = rangeLeft
+          ? classifyHovertagGroups(editorLeft,  rangeLeft.selectionStart,  rangeLeft.selectionEnd)
+          : emptyClassification;
+        const clRight = rangeRight
+          ? classifyHovertagGroups(editorRight, rangeRight.selectionStart, rangeRight.selectionEnd)
+          : emptyClassification;
+
+        // どちらかで C≥1 が発生したら両方キャンセルしてトーストを表示
+        if (clLeft.classC.length >= 1 || clRight.classC.length >= 1) {
+          showToast("親子関係が設定できません");
+          return;
+        }
+
+        // 適用
+        if (rangeLeft) {
+          applyHighlightTransform(editorLeft, newHoverTag);
+        }
+        if (rangeRight) {
+          applyHighlightTransform(editorRight, newHoverTag);
+        }
         return;
       }
 
@@ -204,7 +429,7 @@ export default function Home() {
       event.preventDefault();
       editor.insertText("\n");
     }
-  }, [mode]);
+  }, [mode, editorLeft, editorRight, showToast]);
 
   return (
     <ModeContext.Provider value={mode}>
@@ -449,6 +674,28 @@ export default function Home() {
             </div>
           </section>
         </main>
+
+        {/* トースト通知 */}
+        {toastMessage && (
+          <div style={{
+            position: "fixed",
+            bottom: "2.5rem",
+            left: "50%",
+            transform: "translateX(-50%)",
+            backgroundColor: "#1a1a1a",
+            color: "#ffffff",
+            padding: "0.65rem 1.4rem",
+            borderRadius: "6px",
+            fontSize: "0.875rem",
+            fontWeight: "500",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
+            zIndex: 9999,
+            pointerEvents: "none",
+            whiteSpace: "nowrap",
+          }}>
+            {toastMessage}
+          </div>
+        )}
 
         {/* フッター（補助的テキスト） */}
         <footer style={{

@@ -12,7 +12,6 @@ export const HighlightElement = (props: RenderElementProps) => {
 
   const HandleMouseEnter = () => {
     if (mode !== "confirm") return;
-    console.log("HandleMouseEnter", tag);
     if (tag === null || tag === undefined) return;
     highlightManager?.AddMouseEnterings(tag);
     highlightManager?.SetHighlighted();
