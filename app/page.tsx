@@ -70,7 +70,7 @@ function classifyHovertagGroups(
   for (const [tag, paths] of groups) {
     const sp = [...paths].sort(Path.compare);
     const gStart = Editor.start(editor, sp[0]);
-    const gEnd   = Editor.end(editor, sp[sp.length - 1]);
+    const gEnd = Editor.end(editor, sp[sp.length - 1]);
 
     // 重なりなし → スキップ
     if (Point.isAfter(gStart, selectionEnd) || Point.isBefore(gEnd, selectionStart)) continue;
@@ -140,6 +140,51 @@ function applyHighlightTransform(
       { at: { anchor: newStart, focus: newEnd } }
     );
   });
+}
+
+/**
+ * カスタム正規化ルールを適用する。
+ * 修正を行った場合は true を返し、そうでない場合は false を返す。
+ */
+function customNormalize(editor: Editor, entry: NodeEntry): boolean {
+  const [node, path] = entry;
+
+  // 1. 親関係の解体ルール：
+  // ノードがインラインノードかつ hovertag が null であり、
+  // その子要素に別のインラインノードが存在する場合、その親ノードを unwrap (解体) する。
+  if (Element.isElement(node) && node.type === "inline" && node.hovertag === null) {
+    const hasInlineChild = node.children.some(
+      (child) => Element.isElement(child) && child.type === "inline"
+    );
+    if (hasInlineChild) {
+      Transforms.unwrapNodes(editor, { at: path });
+      return true;
+    }
+  }
+
+  // 2. 隣接ノードの統合ルール：
+  // 現在のノードの子要素の中に、同一の hovertag を持つインラインノードが連続して並んでいる場合、
+  // それらを 1 つのインラインノードにマージする。
+  if (Element.isElement(node)) {
+    for (let i = 0; i < node.children.length - 1; i++) {
+      const child = node.children[i];
+      const nextChild = node.children[i + 1];
+
+      if (
+        Element.isElement(child) &&
+        child.type === "inline" &&
+        Element.isElement(nextChild) &&
+        nextChild.type === "inline" &&
+        (child as any).hovertag === (nextChild as any).hovertag
+      ) {
+        const nextPath = path.concat(i + 1);
+        Transforms.mergeNodes(editor, { at: nextPath });
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 // ─── 初期値 ────────────────────────────────────────────────────────────────
@@ -287,17 +332,29 @@ export default function Home() {
 
   const [editorLeft] = useState(() => {
     const editor = withReact(createEditor());
-    const { isInline } = editor;
+    const { isInline, normalizeNode } = editor;
     editor.isInline = (element: any) => {
       return element.type === "inline" ? true : isInline(element);
+    };
+    editor.normalizeNode = (entry: NodeEntry) => {
+      if (customNormalize(editor, entry)) {
+        return;
+      }
+      normalizeNode(entry);
     };
     return editor;
   });
   const [editorRight] = useState(() => {
     const editor = withReact(createEditor());
-    const { isInline } = editor;
+    const { isInline, normalizeNode } = editor;
     editor.isInline = (element: any) => {
       return element.type === "inline" ? true : isInline(element);
+    };
+    editor.normalizeNode = (entry: NodeEntry) => {
+      if (customNormalize(editor, entry)) {
+        return;
+      }
+      normalizeNode(entry);
     };
     return editor;
   });
@@ -385,7 +442,7 @@ export default function Home() {
         const newHoverTag = maxTag + 1;
 
         // 両エディタの insertHighlight 範囲を取得
-        const rangeLeft  = getInsertHighlightRange(editorLeft);
+        const rangeLeft = getInsertHighlightRange(editorLeft);
         const rangeRight = getInsertHighlightRange(editorRight);
         if (!rangeLeft && !rangeRight) return;
 
@@ -396,8 +453,8 @@ export default function Home() {
           classC: [] as number[],
           groups: new Map<number, Path[]>(),
         };
-        const clLeft  = rangeLeft
-          ? classifyHovertagGroups(editorLeft,  rangeLeft.selectionStart,  rangeLeft.selectionEnd)
+        const clLeft = rangeLeft
+          ? classifyHovertagGroups(editorLeft, rangeLeft.selectionStart, rangeLeft.selectionEnd)
           : emptyClassification;
         const clRight = rangeRight
           ? classifyHovertagGroups(editorRight, rangeRight.selectionStart, rangeRight.selectionEnd)
@@ -416,6 +473,64 @@ export default function Home() {
         if (rangeRight) {
           applyHighlightTransform(editorRight, newHoverTag);
         }
+        return;
+      }
+
+      // insert モード中の Ctrl + - : 左右のエディタの選択範囲と重なる hovertag を持つノードのハイライトを解除
+      if (mode === "insert" && isCmdOrCtrl && event.key === "-") {
+        event.preventDefault();
+
+        const tagsToRemove = new Set<number>();
+
+        // 1. 左右それぞれのエディタで範囲取得と hovertag 収集を行う
+        for (const targetEditor of [editorLeft, editorRight]) {
+          const rangeInfo = getInsertHighlightRange(targetEditor);
+          if (rangeInfo) {
+            const { selectionStart, selectionEnd } = rangeInfo;
+            // 選択範囲と少しでも重なっている hovertag を収集
+            for (const [node, path] of Node.nodes(targetEditor)) {
+              if (Element.isElement(node) && typeof (node as any).hovertag === "number") {
+                const nodeStart = Editor.start(targetEditor, path);
+                const nodeEnd = Editor.end(targetEditor, path);
+
+                // 重なりの判定：nodeStart <= selectionEnd かつ nodeEnd >= selectionStart
+                const overlaps = !Point.isAfter(nodeStart, selectionEnd) && !Point.isBefore(nodeEnd, selectionStart);
+                if (overlaps) {
+                  tagsToRemove.add((node as any).hovertag);
+                }
+              }
+            }
+          }
+        }
+
+        if (tagsToRemove.size === 0) return;
+
+        // 2. 左右のエディタから、該当する hovertag を持つノードの hovertag を null に更新し、
+        // insertHighlight マークもすべて解除する
+        for (const targetEditor of [editorLeft, editorRight]) {
+          Editor.withoutNormalizing(targetEditor, () => {
+            const matches: Path[] = [];
+            for (const [node, path] of Node.nodes(targetEditor)) {
+              if (Element.isElement(node) && typeof (node as any).hovertag === "number") {
+                if (tagsToRemove.has((node as any).hovertag)) {
+                  matches.push(path);
+                }
+              }
+            }
+            // パスが変わらないように後ろから適用
+            for (const path of [...matches].reverse()) {
+              Transforms.setNodes(targetEditor, { hovertag: null } as any, { at: path });
+            }
+
+            // すべてのエディタから insertHighlight マークを解除する
+            for (const [node, path] of Node.nodes(targetEditor)) {
+              if (Text.isText(node) && (node as any).insertHighlight) {
+                Transforms.unsetNodes(targetEditor, "insertHighlight", { at: path });
+              }
+            }
+          });
+        }
+
         return;
       }
 
