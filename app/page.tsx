@@ -37,6 +37,39 @@ function getInsertHighlightRange(editor: Editor): {
   };
 }
 
+/** エディタを1回走査して、最大 hovertag と insertHighlight が付いたテキストノードの範囲情報を返す */
+function scanEditorForHighlightAndMaxTag(editor: Editor): {
+  maxTag: number;
+  range: {
+    sorted: Path[];
+    selectionStart: Point;
+    selectionEnd: Point;
+  } | null;
+} {
+  let maxTag = 0;
+  const paths: Path[] = [];
+  for (const [node, path] of Node.nodes(editor)) {
+    if (Element.isElement(node) && typeof (node as any).hovertag === "number") {
+      const tag = (node as any).hovertag as number;
+      if (tag > maxTag) maxTag = tag;
+    } else if (Text.isText(node) && (node as any).insertHighlight) {
+      paths.push(path);
+    }
+  }
+  if (paths.length === 0) {
+    return { maxTag, range: null };
+  }
+  const sorted = [...paths].sort(Path.compare);
+  return {
+    maxTag,
+    range: {
+      sorted,
+      selectionStart: Editor.start(editor, sorted[0]),
+      selectionEnd: Editor.end(editor, sorted[sorted.length - 1]),
+    },
+  };
+}
+
 /**
  * hovertag グループを A・B・C に分類して返す。
  *   A: グループ範囲が選択範囲に完全に内包される
@@ -253,6 +286,11 @@ export default function Home() {
   const [mode, setMode] = useState<Mode>("edit");
   const lastActiveMode = useRef<"edit" | "confirm">("edit");
 
+  // エディタデータ状態と再生成用キー
+  const [valueLeft, setValueLeft] = useState<Descendant[]>(initialValueLeft);
+  const [valueRight, setValueRight] = useState<Descendant[]>(initialValueRight);
+  const [importKey, setImportKey] = useState<number>(0);
+
   // トースト通知
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -330,7 +368,7 @@ export default function Home() {
     }, 0);
   }, [mode]);
 
-  const [editorLeft] = useState(() => {
+  const editorLeft = useMemo(() => {
     const editor = withReact(createEditor());
     const { isInline, normalizeNode } = editor;
     editor.isInline = (element: any) => {
@@ -343,8 +381,10 @@ export default function Home() {
       normalizeNode(entry);
     };
     return editor;
-  });
-  const [editorRight] = useState(() => {
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importKey]);
+
+  const editorRight = useMemo(() => {
     const editor = withReact(createEditor());
     const { isInline, normalizeNode } = editor;
     editor.isInline = (element: any) => {
@@ -357,10 +397,71 @@ export default function Home() {
       normalizeNode(entry);
     };
     return editor;
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importKey]);
+
+  // ─── Import / Export 機能の実装 ───────────────────────────────────────────
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleExport = useCallback(() => {
+    const exportData = {
+      format: "DoubleApple",
+      version: "1.0",
+      editorLeft: editorLeft.children,
+      editorRight: editorRight.children,
+    };
+
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `doubleapple_backup_${Date.now()}.dapl`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast("エクスポートしました");
+  }, [editorLeft, editorRight, showToast]);
+
+  const handleImportButtonClick = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.name.endsWith(".dapl")) {
+      showToast("拡張子が .dapl のファイルを選択してください");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target?.result as string);
+
+        if (data.format !== "DoubleApple") {
+          showToast("無効なファイル形式です");
+          return;
+        }
+
+        setValueLeft(data.editorLeft);
+        setValueRight(data.editorRight);
+        setImportKey(prev => prev + 1);
+        showToast("インポートしました");
+      } catch (err) {
+        showToast("ファイルの解析に失敗しました");
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = "";
+  }, [showToast]);
 
   // HighlightManagerの初期化（エディタをキャッシュ）
-  useMemo(() => initHighlightManager(editorLeft, editorRight), [editorLeft, editorRight]);
+  useEffect(() => {
+    initHighlightManager(editorLeft, editorRight);
+  }, [editorLeft, editorRight]);
 
   // modeがinsertから他の状態に遷移したとき、insertHighlightマークをすべて破棄
   const prevMode = useRef<Mode>(mode);
@@ -429,21 +530,15 @@ export default function Home() {
       if (mode === "insert" && isCmdOrCtrl && event.key === "Enter") {
         event.preventDefault();
 
-        // 左右エディタ全体から最大 hovertag を取得し +1 を新タグとする
-        let maxTag = 0;
-        for (const targetEditor of [editorLeft, editorRight]) {
-          for (const [node] of Node.nodes(targetEditor)) {
-            if (Element.isElement(node) && typeof (node as any).hovertag === "number") {
-              const tag = (node as any).hovertag as number;
-              if (tag > maxTag) maxTag = tag;
-            }
-          }
-        }
+        // 左右エディタそれぞれを1回走査して、最大 hovertag と範囲情報を同時に取得
+        const resultLeft = scanEditorForHighlightAndMaxTag(editorLeft);
+        const resultRight = scanEditorForHighlightAndMaxTag(editorRight);
+
+        const maxTag = Math.max(resultLeft.maxTag, resultRight.maxTag);
         const newHoverTag = maxTag + 1;
 
-        // 両エディタの insertHighlight 範囲を取得
-        const rangeLeft = getInsertHighlightRange(editorLeft);
-        const rangeRight = getInsertHighlightRange(editorRight);
+        const rangeLeft = resultLeft.range;
+        const rangeRight = resultRight.range;
         if (!rangeLeft && !rangeRight) return;
 
         // 両エディタを A/B/C 分類
@@ -548,6 +643,13 @@ export default function Home() {
 
   return (
     <ModeContext.Provider value={mode}>
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileChange}
+        accept=".dapl"
+        style={{ display: "none" }}
+      />
       <div style={{
         display: "flex",
         flexDirection: "column",
@@ -561,11 +663,13 @@ export default function Home() {
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: "1rem",
           padding: "0.75rem 2rem", // 上下の余白を少し減らす
           borderBottom: `4px double ${COLOR_BLACK}`, // 二本線かつ少し太い境界線
           backgroundColor: COLOR_WHITE,
         }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
             {/* ロゴの表示 */}
             <div style={{ position: "relative", width: "40px", height: "40px" }}>
               <Image
@@ -585,6 +689,10 @@ export default function Home() {
             }}>
               DoubleApple
             </h1>
+            <div style={{ display: "flex", gap: "0.5rem", marginLeft: "1rem" }}>
+              <button className="header-btn" onClick={handleImportButtonClick}>Import</button>
+              <button className="header-btn" onClick={handleExport}>Export</button>
+            </div>
           </div>
 
           {/* モード選択インジケーター */}
@@ -680,15 +788,15 @@ export default function Home() {
                 display: "flex",
                 flexDirection: "column",
               }}>
-                <Slate editor={editorLeft} initialValue={initialValueLeft}>
+                <Slate key={`left-${importKey}`} editor={editorLeft} initialValue={valueLeft}>
                   <Editable
                     placeholder="左側のエディタに入力..."
                     readOnly={mode === "confirm"}
                     onBeforeInput={(event) => {
                       if (mode !== "edit") event.preventDefault();
                     }}
-                    onFocus={() => setIsFocusedLeft(true)}
-                    onBlur={() => setIsFocusedLeft(false)}
+                    onFocus={() => { setIsFocusedLeft(true); setIsFocusedRight(false); }}
+                    onBlur={() => { setIsFocusedLeft(false); setIsFocusedRight(true); }}
                     onKeyDown={(event) => handleKeyDown(event, editorLeft)}
                     onMouseUp={() => handleMouseUp(editorLeft)}
                     renderElement={renderElement}
@@ -761,15 +869,15 @@ export default function Home() {
                 display: "flex",
                 flexDirection: "column",
               }}>
-                <Slate editor={editorRight} initialValue={initialValueRight}>
+                <Slate key={`right-${importKey}`} editor={editorRight} initialValue={valueRight}>
                   <Editable
                     placeholder="右側のエディタに入力..."
                     readOnly={mode === "confirm"}
                     onBeforeInput={(event) => {
                       if (mode !== "edit") event.preventDefault();
                     }}
-                    onFocus={() => setIsFocusedRight(true)}
-                    onBlur={() => setIsFocusedRight(false)}
+                    onFocus={() => { setIsFocusedRight(true); setIsFocusedLeft(false); }}
+                    onBlur={() => { setIsFocusedRight(false); setIsFocusedLeft(true); }}
                     onKeyDown={(event) => handleKeyDown(event, editorRight)}
                     onMouseUp={() => handleMouseUp(editorRight)}
                     renderElement={renderElement}

@@ -11,3 +11,20 @@ body {
     /* 純粋な黒(#000)より、わずかに優しい墨色にすることで目を疲れにくくします */
     white-space: pre-wrap;
 }
+
+.header-btn {
+    padding: 0.4rem 0.8rem;
+    border: 1px solid #000000; /* 細い枠線に変更 */
+    border-radius: 4px;
+    background-color: #ffffff;
+    color: #000000;
+    font-weight: 500;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.15s ease-in-out;
+}
+
+.header-btn:hover {
+    background-color: #000000;
+    color: #ffffff;
+}
