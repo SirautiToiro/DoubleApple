@@ -1,5 +1,6 @@
 @charset "utf-8";
 
 .highlighted {
-  color: #3ac941;
+  color: var(--color-hover-highlight-text, #3ac941);
+  background-color: var(--color-hover-highlight-bg, #e8f5e9);
 }

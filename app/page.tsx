@@ -6,6 +6,26 @@ import { Slate, Editable, withReact, ReactEditor, RenderElementProps, RenderLeaf
 import { initHighlightManager, highlightManager } from "./higilightManager";
 import { Leaf, HighlightElement, CodeElement, IsSameElement } from "./elements";
 import { Mode, ModeContext } from "./modeContext";
+export interface Theme {
+  black: string;
+  white: string;
+  editorBg: string;
+  hoverHighlightBg: string;
+  hoverHighlightText: string;
+  insertHighlightBg: string;
+  insertHighlightText: string;
+}
+
+const defaultTheme: Theme = {
+  black: "#000000",
+  white: "#FFFFFF",
+  editorBg: "#FAF9F5",
+  hoverHighlightBg: "#e8f5e9",
+  hoverHighlightText: "#3ac941",
+  insertHighlightBg: "#5b8f2a",
+  insertHighlightText: "#ffffff",
+};
+
 
 //DoubleApple\node_modules\slate\dist\types\custom-types.d.ts
 //に、型定義ファイルがある
@@ -284,7 +304,30 @@ const initialValueRight: Descendant[] = [
 
 export default function Home() {
   const [mode, setMode] = useState<Mode>("edit");
-  const lastActiveMode = useRef<"edit" | "confirm">("edit");
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const [theme, setTheme] = useState<Theme>(defaultTheme);
+  const [isThemeEditorOpen, setIsThemeEditorOpen] = useState(false);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        isMenuOpen &&
+        menuRef.current &&
+        !menuRef.current.contains(event.target as Node) &&
+        menuButtonRef.current &&
+        !menuButtonRef.current.contains(event.target as Node)
+      ) {
+        setIsMenuOpen(false);
+        setIsThemeEditorOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isMenuOpen]);
 
   // エディタデータ状態と再生成用キー
   const [valueLeft, setValueLeft] = useState<Descendant[]>(initialValueLeft);
@@ -302,38 +345,10 @@ export default function Home() {
 
   useEffect(() => {
     const handleGlobalKeyDown = (event: KeyboardEvent) => {
-      // Ctrl+q または Ctrl+Q で対応挿入モードをトグル
-      if (event.ctrlKey && (event.key === "q" || event.key === "Q")) {
+      // Tabキーで編集モードと対応モードをトグル
+      if (event.key === "Tab") {
         event.preventDefault();
-        setMode((prev) => {
-          if (prev === "insert") {
-            return lastActiveMode.current;
-          } else {
-            lastActiveMode.current = prev as "edit" | "confirm";
-            return "insert";
-          }
-        });
-      }
-      // Tabキーで編集モードと対応確認モードをトグル
-      else if (event.key === "Tab") {
-        event.preventDefault();
-        setMode((prev) => {
-          if (prev === "edit") {
-            const next: "edit" | "confirm" = "confirm";
-            lastActiveMode.current = next;
-            return next;
-          } else if (prev === "confirm") {
-            const next: "edit" | "confirm" = "edit";
-            lastActiveMode.current = next;
-            return next;
-          } else if (prev === "insert") {
-            // insert モードからは confirm モードへ遷移
-            const next: "edit" | "confirm" = "confirm";
-            lastActiveMode.current = next;
-            return next;
-          }
-          return prev;
-        });
+        setMode((prev) => (prev === "edit" ? "match" : "edit"));
       }
     };
 
@@ -343,17 +358,12 @@ export default function Home() {
     };
   }, []);
 
-  // modeがconfirmから他の状態に遷移したとき、すべてのハイライトを消去
-  useEffect(() => {
-    if (mode !== "confirm") {
-      highlightManager?.ClearHighlight();
-    }
-  }, [mode]);
+
 
 
 
   const handleMouseUp = useCallback((editor: ReactEditor & BaseEditor) => {
-    if (mode !== "insert") return;
+    if (mode !== "match") return;
     setTimeout(() => {
       const { selection } = editor;
       if (selection && Range.isExpanded(selection)) {
@@ -403,7 +413,7 @@ export default function Home() {
   // ─── Import / Export 機能の実装 ───────────────────────────────────────────
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleExport = useCallback(() => {
+  const handleExport = useCallback(async () => {
     const exportData = {
       format: "DoubleApple",
       version: "1.0",
@@ -411,16 +421,40 @@ export default function Home() {
       editorRight: editorRight.children,
     };
 
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `doubleapple_backup_${Date.now()}.dapl`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast("エクスポートしました");
+    if (typeof window !== "undefined" && "showSaveFilePicker" in window) {
+      try {
+        const handle = await (window as any).showSaveFilePicker({
+          suggestedName: `doubleapple_backup_${Date.now()}.dapl`,
+          types: [{
+            description: "DoubleApple Backup File",
+            accept: {
+              "application/json": [".dapl"],
+            },
+          }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(JSON.stringify(exportData, null, 2));
+        await writable.close();
+        showToast("エクスポートしました");
+      } catch (err: any) {
+        if (err.name !== "AbortError") {
+          console.error(err);
+          showToast("保存に失敗しました");
+        }
+      }
+    } else {
+      // フォールバック
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `doubleapple_backup_${Date.now()}.dapl`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast("エクスポートしました");
+    }
   }, [editorLeft, editorRight, showToast]);
 
   const handleImportButtonClick = useCallback(() => {
@@ -463,19 +497,22 @@ export default function Home() {
     initHighlightManager(editorLeft, editorRight);
   }, [editorLeft, editorRight]);
 
-  // modeがinsertから他の状態に遷移したとき、insertHighlightマークをすべて破棄
+  // modeがmatchから他の状態に遷移したとき、すべてのハイライトおよびinsertHighlightマークを消去
   const prevMode = useRef<Mode>(mode);
   useEffect(() => {
-    if (prevMode.current === "insert" && mode !== "insert") {
-      // 両エディタのすべてのテキストノードからinsertHighlightを除去
-      for (const editor of [editorLeft, editorRight]) {
-        Editor.withoutNormalizing(editor, () => {
-          for (const [node, path] of Node.nodes(editor)) {
-            if (Text.isText(node) && (node as any).insertHighlight) {
-              Transforms.unsetNodes(editor, "insertHighlight", { at: path });
+    if (mode !== "match") {
+      highlightManager?.ClearHighlight();
+      if (prevMode.current === "match") {
+        // 両エディタのすべてのテキストノードからinsertHighlightを除去
+        for (const editor of [editorLeft, editorRight]) {
+          Editor.withoutNormalizing(editor, () => {
+            for (const [node, path] of Node.nodes(editor)) {
+              if (Text.isText(node) && (node as any).insertHighlight) {
+                Transforms.unsetNodes(editor, "insertHighlight", { at: path });
+              }
             }
-          }
-        });
+          });
+        }
       }
     }
     prevMode.current = mode;
@@ -486,9 +523,9 @@ export default function Home() {
   const [isFocusedRight, setIsFocusedRight] = useState(false);
 
   // 3色定義
-  const COLOR_BLACK = "#000000";
-  const COLOR_WHITE = "#FFFFFF";
-  const COLOR_BEIGE_WHITE = "#FAF9F5"; // ごく僅かにベージュが混ざった白
+  const COLOR_BLACK = "var(--color-black)";
+  const COLOR_WHITE = "var(--color-white)";
+  const COLOR_BEIGE_WHITE = "var(--color-editor-bg)";
 
   // Define a rendering function based on the element passed to `props`. We use
   // `useCallback` here to memoize the function for subsequent renders.
@@ -521,13 +558,13 @@ export default function Home() {
         return;
       }
 
-      // モード切り替え用のキー（Tab, Ctrl+Q）は許可
-      if (event.key === "Tab" || (isCmdOrCtrl && (event.key === "q" || event.key === "Q"))) {
+      // モード切り替え用のキー（Tab）は許可
+      if (event.key === "Tab") {
         return;
       }
 
-      // insert モード中の Ctrl+Enter: insertHighlight を hovertag inline ノードに変換
-      if (mode === "insert" && isCmdOrCtrl && event.key === "Enter") {
+      // 対応モード中の Ctrl+Enter: insertHighlight を hovertag inline ノードに変換
+      if (mode === "match" && isCmdOrCtrl && event.key === "Enter") {
         event.preventDefault();
 
         // 左右エディタそれぞれを1回走査して、最大 hovertag と範囲情報を同時に取得
@@ -571,8 +608,8 @@ export default function Home() {
         return;
       }
 
-      // insert モード中の Ctrl + - : 左右のエディタの選択範囲と重なる hovertag を持つノードのハイライトを解除
-      if (mode === "insert" && isCmdOrCtrl && event.key === "-") {
+      // 対応モード中の Ctrl + - : 左右のエディタの選択範囲と重なる hovertag を持つノードのハイライトを解除
+      if (mode === "match" && isCmdOrCtrl && event.key === "-") {
         event.preventDefault();
 
         const tagsToRemove = new Set<number>();
@@ -654,10 +691,17 @@ export default function Home() {
         display: "flex",
         flexDirection: "column",
         minHeight: "100vh",
-        backgroundColor: COLOR_WHITE,
-        color: COLOR_BLACK,
+        backgroundColor: "var(--color-white)",
+        color: "var(--color-black)",
         fontFamily: "var(--font-geist-sans), sans-serif",
-      }}>
+        "--color-black": theme.black,
+        "--color-white": theme.white,
+        "--color-editor-bg": theme.editorBg,
+        "--color-hover-highlight-text": theme.hoverHighlightText,
+        "--color-hover-highlight-bg": theme.hoverHighlightBg,
+        "--color-insert-highlight-bg": theme.insertHighlightBg,
+        "--color-insert-highlight-text": theme.insertHighlightText,
+      } as React.CSSProperties}>
         {/* ヘッダー部分 */}
         <header style={{
           display: "flex",
@@ -668,8 +712,50 @@ export default function Home() {
           padding: "0.75rem 2rem", // 上下の余白を少し減らす
           borderBottom: `4px double ${COLOR_BLACK}`, // 二本線かつ少し太い境界線
           backgroundColor: COLOR_WHITE,
+          position: "relative", // メニューの絶対配置基準
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
+            {/* ハンバーガーボタン */}
+            <button
+              ref={menuButtonRef}
+              onClick={() => setIsMenuOpen(prev => !prev)}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: "space-around",
+                width: "28px",
+                height: "20px",
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+                padding: 0,
+                zIndex: 101,
+              }}
+              aria-label="Menu"
+            >
+              <div style={{
+                width: "24px",
+                height: "3px",
+                backgroundColor: COLOR_BLACK,
+                transition: "transform 0.2s, opacity 0.2s",
+                transform: isMenuOpen ? "translateY(6px) rotate(45deg)" : "none",
+              }} />
+              <div style={{
+                width: "24px",
+                height: "3px",
+                backgroundColor: COLOR_BLACK,
+                transition: "opacity 0.2s",
+                opacity: isMenuOpen ? 0 : 1,
+              }} />
+              <div style={{
+                width: "24px",
+                height: "3px",
+                backgroundColor: COLOR_BLACK,
+                transition: "transform 0.2s, opacity 0.2s",
+                transform: isMenuOpen ? "translateY(-5px) rotate(-45deg)" : "none",
+              }} />
+            </button>
+
             {/* ロゴの表示 */}
             <div style={{ position: "relative", width: "40px", height: "40px" }}>
               <Image
@@ -689,18 +775,13 @@ export default function Home() {
             }}>
               DoubleApple
             </h1>
-            <div style={{ display: "flex", gap: "0.5rem", marginLeft: "1rem" }}>
-              <button className="header-btn" onClick={handleImportButtonClick}>Import</button>
-              <button className="header-btn" onClick={handleExport}>Export</button>
-            </div>
           </div>
 
           {/* モード選択インジケーター */}
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
             {[
               { id: "edit", label: "編集モード", shortcut: "Tab" },
-              { id: "confirm", label: "対応確認モード", shortcut: "Tab" },
-              { id: "insert", label: "対応挿入モード", shortcut: "Ctrl+Q" },
+              { id: "match", label: "対応モード", shortcut: "Tab" },
             ].map((item) => {
               const isActive = mode === item.id;
               return (
@@ -735,6 +816,177 @@ export default function Home() {
               );
             })}
           </div>
+
+          {/* 縦連結ハンバーガーメニュー */}
+          {isMenuOpen && (
+            <div
+              ref={menuRef}
+              style={{
+                position: "absolute",
+                top: "100%",
+                left: "2rem",
+                display: "flex",
+                flexDirection: "row",
+                alignItems: "flex-start",
+                zIndex: 100,
+                marginTop: "0.25rem",
+              }}
+            >
+              {/* メインメニュー項目 */}
+              <div style={{
+                display: "flex",
+                flexDirection: "column",
+                backgroundColor: COLOR_WHITE,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+              }}>
+                {[
+                  { label: "Import", onClick: () => { setIsMenuOpen(false); handleImportButtonClick(); } },
+                  { label: "Export", onClick: () => { setIsMenuOpen(false); handleExport(); } },
+                  { label: "Button A", onClick: () => { setIsMenuOpen(false); showToast("Button A がクリックされました"); } },
+                  { label: "Button B", onClick: () => { setIsMenuOpen(false); showToast("Button B がクリックされました"); } },
+                  { label: "Button C", onClick: () => { setIsMenuOpen(false); showToast("Button C がクリックされました"); } },
+                  {
+                    label: `Theme Settings ▶`,
+                    onClick: () => setIsThemeEditorOpen(prev => !prev),
+                    isActive: isThemeEditorOpen
+                  },
+                ].map((btn, index) => {
+                  const isActive = btn.isActive;
+                  return (
+                    <button
+                      key={btn.label}
+                      onClick={btn.onClick}
+                      style={{
+                        width: "180px", // 横長の直方体
+                        height: "44px",
+                        border: `2px solid ${COLOR_BLACK}`,
+                        // 隣接するボタンの境界線が重なって太くなるのを防ぐため、2番目以降のボタンの borderTop を "none" にする
+                        borderTop: index === 0 ? `2px solid ${COLOR_BLACK}` : "none",
+                        backgroundColor: isActive ? COLOR_BLACK : COLOR_WHITE,
+                        color: isActive ? COLOR_WHITE : COLOR_BLACK,
+                        fontSize: "0.9rem",
+                        fontWeight: "700",
+                        cursor: "pointer",
+                        textAlign: "left",
+                        padding: "0 1.25rem",
+                        transition: "all 0.15s ease-in-out",
+                        display: "flex",
+                        alignItems: "center",
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!isActive) {
+                          e.currentTarget.style.backgroundColor = COLOR_BLACK;
+                          e.currentTarget.style.color = COLOR_WHITE;
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!isActive) {
+                          e.currentTarget.style.backgroundColor = COLOR_WHITE;
+                          e.currentTarget.style.color = COLOR_BLACK;
+                        }
+                      }}
+                    >
+                      {btn.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* テーマ色の各ピッカー（右展開） */}
+              {isThemeEditorOpen && (
+                <div style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  backgroundColor: COLOR_WHITE,
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+                  marginLeft: "-2px", // メインメニューの右ボーダーと重ねる
+                }}>
+                  {[
+                    { key: "black", label: "Text & Line" },
+                    { key: "white", label: "App Bg" },
+                    { key: "editorBg", label: "Editor Bg" },
+                    { key: "hoverHighlightBg", label: "Hover Bg" },
+                    { key: "hoverHighlightText", label: "Hover Text" },
+                    { key: "insertHighlightBg", label: "Insert Bg" },
+                    { key: "insertHighlightText", label: "Insert Text" },
+                  ].map((item, index) => {
+                    return (
+                      <div
+                        key={item.key}
+                        style={{
+                          width: "180px",
+                          height: "44px",
+                          border: `2px solid ${COLOR_BLACK}`,
+                          borderTop: index === 0 ? `2px solid ${COLOR_BLACK}` : "none",
+                          backgroundColor: COLOR_WHITE,
+                          color: COLOR_BLACK,
+                          fontSize: "0.85rem",
+                          fontWeight: "700",
+                          padding: "0 1.25rem",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          boxSizing: "border-box",
+                        }}
+                      >
+                        <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>{item.label}</span>
+                        <input
+                          type="color"
+                          value={(theme as any)[item.key]}
+                          onChange={(e) => {
+                            setTheme(prev => ({
+                              ...prev,
+                              [item.key]: e.target.value
+                            }));
+                          }}
+                          style={{
+                            border: "none",
+                            width: "24px",
+                            height: "24px",
+                            padding: 0,
+                            backgroundColor: "transparent",
+                            cursor: "pointer",
+                            outline: "none",
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                  {/* Reset ボタン */}
+                  <button
+                    onClick={() => {
+                      setTheme(defaultTheme);
+                      showToast("テーマを初期値に戻しました");
+                    }}
+                    style={{
+                      width: "180px",
+                      height: "44px",
+                      border: `2px solid ${COLOR_BLACK}`,
+                      borderTop: "none",
+                      backgroundColor: COLOR_WHITE,
+                      color: COLOR_BLACK,
+                      fontSize: "0.85rem",
+                      fontWeight: "700",
+                      cursor: "pointer",
+                      textAlign: "center",
+                      padding: "0 1.25rem",
+                      transition: "all 0.15s ease-in-out",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = COLOR_BLACK;
+                      e.currentTarget.style.color = COLOR_WHITE;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = COLOR_WHITE;
+                      e.currentTarget.style.color = COLOR_BLACK;
+                    }}
+                  >
+                    Reset
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </header>
 
         {/* メインの左右スプリットビュー */}
@@ -791,7 +1043,6 @@ export default function Home() {
                 <Slate key={`left-${importKey}`} editor={editorLeft} initialValue={valueLeft}>
                   <Editable
                     placeholder="左側のエディタに入力..."
-                    readOnly={mode === "confirm"}
                     onBeforeInput={(event) => {
                       if (mode !== "edit") event.preventDefault();
                     }}
@@ -872,7 +1123,6 @@ export default function Home() {
                 <Slate key={`right-${importKey}`} editor={editorRight} initialValue={valueRight}>
                   <Editable
                     placeholder="右側のエディタに入力..."
-                    readOnly={mode === "confirm"}
                     onBeforeInput={(event) => {
                       if (mode !== "edit") event.preventDefault();
                     }}

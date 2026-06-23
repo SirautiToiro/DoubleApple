@@ -11,13 +11,13 @@ export const HighlightElement = (props: RenderElementProps) => {
   const mode = useContext(ModeContext);
 
   const HandleMouseEnter = () => {
-    if (mode !== "confirm") return;
+    if (mode !== "match") return;
     if (tag === null || tag === undefined) return;
     highlightManager?.AddMouseEnterings(tag);
     highlightManager?.SetHighlighted();
   };
   const HandleMouseLeave = () => {
-    if (mode !== "confirm") return;
+    if (mode !== "match") return;
     if (tag === null || tag === undefined) return;
     highlightManager?.RemoveMouseEntering(tag);
     highlightManager?.SetHighlighted();
@@ -48,8 +48,8 @@ export const CodeElement = (props: RenderElementProps) => {
 export const Leaf = (props: RenderLeafProps) => {
   const style: React.CSSProperties = {
     fontWeight: props.leaf.bold ? "bold" : "normal",
-    backgroundColor: (props.leaf as any).insertHighlight ? "#5b8f2aff" : undefined,
-    color: (props.leaf as any).insertHighlight ? "#FFFFFF" : undefined,
+    backgroundColor: (props.leaf as any).insertHighlight ? "var(--color-insert-highlight-bg, #5b8f2a)" : undefined,
+    color: (props.leaf as any).insertHighlight ? "var(--color-insert-highlight-text, #ffffff)" : undefined,
   };
   return (
     <span
