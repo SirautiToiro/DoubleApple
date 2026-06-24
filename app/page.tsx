@@ -544,6 +544,123 @@ export default function Home() {
     return <Leaf {...props} />;
   }, []);
 
+  // 対応モード中の挿入アクション
+  const handleInsertHighlight = useCallback(() => {
+    // 左右エディタそれぞれを1回走査して、最大 hovertag と範囲情報を同時に取得
+    const resultLeft = scanEditorForHighlightAndMaxTag(editorLeft);
+    const resultRight = scanEditorForHighlightAndMaxTag(editorRight);
+
+    const maxTag = Math.max(resultLeft.maxTag, resultRight.maxTag);
+    const newHoverTag = maxTag + 1;
+
+    const rangeLeft = resultLeft.range;
+    const rangeRight = resultRight.range;
+    if (!rangeLeft && !rangeRight) return;
+
+    // 両エディタを A/B/C 分類
+    const emptyClassification = {
+      classA: [] as number[],
+      classB: [] as number[],
+      classC: [] as number[],
+      groups: new Map<number, Path[]>(),
+    };
+    const clLeft = rangeLeft
+      ? classifyHovertagGroups(editorLeft, rangeLeft.selectionStart, rangeLeft.selectionEnd)
+      : emptyClassification;
+    const clRight = rangeRight
+      ? classifyHovertagGroups(editorRight, rangeRight.selectionStart, rangeRight.selectionEnd)
+      : emptyClassification;
+
+    // どちらかで C≥1 が発生したら両方キャンセルしてトーストを表示
+    if (clLeft.classC.length >= 1 || clRight.classC.length >= 1) {
+      showToast("親子関係が設定できません");
+      return;
+    }
+
+    // 適用
+    if (rangeLeft) {
+      applyHighlightTransform(editorLeft, newHoverTag);
+    }
+    if (rangeRight) {
+      applyHighlightTransform(editorRight, newHoverTag);
+    }
+  }, [editorLeft, editorRight, showToast]);
+
+  // 対応モード中の解除アクション (差分トリミング処理)
+  const handleRemoveHighlight = useCallback(() => {
+    // 左右のエディタについて独立して、選択されたテキストノード（insertHighlight 付き）をトリミングする
+    Editor.withoutNormalizing(editorLeft, () => {
+      Editor.withoutNormalizing(editorRight, () => {
+        for (const editor of [editorLeft, editorRight]) {
+          // 1. insertHighlight が付いているテキストノードのパスをすべて収集
+          const paths: Path[] = [];
+          for (const [node, path] of Node.nodes(editor)) {
+            if (Text.isText(node) && (node as any).insertHighlight) {
+              paths.push(path);
+            }
+          }
+          if (paths.length === 0) continue;
+
+          // 2. パスを降順（後ろのノードから順）にソートして、前方ノードのパスずれを防ぐ
+          paths.sort((a, b) => -Path.compare(a, b));
+
+          // 3. パス自動追従のために PathRef の配列を作成
+          const pathRefs = paths.map((p) => Editor.pathRef(editor, p));
+
+          // 4. 各パスに対してトリミングを適用
+          for (const ref of pathRefs) {
+            let currentPath = ref.current;
+            if (!currentPath) continue;
+
+            // 4a. 終了位置で分割
+            const endPoint = Editor.end(editor, currentPath);
+            Transforms.splitNodes(editor, {
+              at: endPoint,
+              match: (n) => Element.isElement(n) && editor.isInline(n) && typeof (n as any).hovertag === "number",
+              always: false,
+            });
+
+            // 分割によりパスが変化した可能性があるため、最新のパスを再取得
+            currentPath = ref.current;
+            if (!currentPath) continue;
+
+            // 4b. 開始位置で分割
+            const startPoint = Editor.start(editor, currentPath);
+            Transforms.splitNodes(editor, {
+              at: startPoint,
+              match: (n) => Element.isElement(n) && editor.isInline(n) && typeof (n as any).hovertag === "number",
+              always: false,
+            });
+
+            // 再度、最新のパスを再取得
+            currentPath = ref.current;
+            if (!currentPath) continue;
+
+            // 4c. 隔離されたテキストノードの祖先にある hovertag: number のインラインノードの hovertag を null に設定
+            const ancestorPaths: Path[] = [];
+            for (const [node, ancestorPath] of Node.ancestors(editor, currentPath)) {
+              if (Element.isElement(node) && editor.isInline(node) && typeof (node as any).hovertag === "number") {
+                ancestorPaths.push(ancestorPath);
+              }
+            }
+            // 親に近い順から null 化されるように逆順で適用
+            for (const aPath of [...ancestorPaths].reverse()) {
+              Transforms.setNodes(editor, { hovertag: null } as any, { at: aPath });
+            }
+
+            // 4d. テキストノードから insertHighlight マークを解除
+            Transforms.unsetNodes(editor, "insertHighlight", { at: currentPath });
+          }
+
+          // PathRef のクリーンアップ（メモリリーク防止）
+          for (const ref of pathRefs) {
+            ref.unref();
+          }
+        }
+      });
+    });
+  }, [editorLeft, editorRight]);
+
   // キー入力ハンドラー
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>, editor: ReactEditor & BaseEditor) => {
     if (mode !== "edit") {
@@ -566,103 +683,14 @@ export default function Home() {
       // 対応モード中の Ctrl+Enter: insertHighlight を hovertag inline ノードに変換
       if (mode === "match" && isCmdOrCtrl && event.key === "Enter") {
         event.preventDefault();
-
-        // 左右エディタそれぞれを1回走査して、最大 hovertag と範囲情報を同時に取得
-        const resultLeft = scanEditorForHighlightAndMaxTag(editorLeft);
-        const resultRight = scanEditorForHighlightAndMaxTag(editorRight);
-
-        const maxTag = Math.max(resultLeft.maxTag, resultRight.maxTag);
-        const newHoverTag = maxTag + 1;
-
-        const rangeLeft = resultLeft.range;
-        const rangeRight = resultRight.range;
-        if (!rangeLeft && !rangeRight) return;
-
-        // 両エディタを A/B/C 分類
-        const emptyClassification = {
-          classA: [] as number[],
-          classB: [] as number[],
-          classC: [] as number[],
-          groups: new Map<number, Path[]>(),
-        };
-        const clLeft = rangeLeft
-          ? classifyHovertagGroups(editorLeft, rangeLeft.selectionStart, rangeLeft.selectionEnd)
-          : emptyClassification;
-        const clRight = rangeRight
-          ? classifyHovertagGroups(editorRight, rangeRight.selectionStart, rangeRight.selectionEnd)
-          : emptyClassification;
-
-        // どちらかで C≥1 が発生したら両方キャンセルしてトーストを表示
-        if (clLeft.classC.length >= 1 || clRight.classC.length >= 1) {
-          showToast("親子関係が設定できません");
-          return;
-        }
-
-        // 適用
-        if (rangeLeft) {
-          applyHighlightTransform(editorLeft, newHoverTag);
-        }
-        if (rangeRight) {
-          applyHighlightTransform(editorRight, newHoverTag);
-        }
+        handleInsertHighlight();
         return;
       }
 
       // 対応モード中の Ctrl + - : 左右のエディタの選択範囲と重なる hovertag を持つノードのハイライトを解除
       if (mode === "match" && isCmdOrCtrl && event.key === "-") {
         event.preventDefault();
-
-        const tagsToRemove = new Set<number>();
-
-        // 1. 左右それぞれのエディタで範囲取得と hovertag 収集を行う
-        for (const targetEditor of [editorLeft, editorRight]) {
-          const rangeInfo = getInsertHighlightRange(targetEditor);
-          if (rangeInfo) {
-            const { selectionStart, selectionEnd } = rangeInfo;
-            // 選択範囲と少しでも重なっている hovertag を収集
-            for (const [node, path] of Node.nodes(targetEditor)) {
-              if (Element.isElement(node) && typeof (node as any).hovertag === "number") {
-                const nodeStart = Editor.start(targetEditor, path);
-                const nodeEnd = Editor.end(targetEditor, path);
-
-                // 重なりの判定：nodeStart <= selectionEnd かつ nodeEnd >= selectionStart
-                const overlaps = !Point.isAfter(nodeStart, selectionEnd) && !Point.isBefore(nodeEnd, selectionStart);
-                if (overlaps) {
-                  tagsToRemove.add((node as any).hovertag);
-                }
-              }
-            }
-          }
-        }
-
-        if (tagsToRemove.size === 0) return;
-
-        // 2. 左右のエディタから、該当する hovertag を持つノードの hovertag を null に更新し、
-        // insertHighlight マークもすべて解除する
-        for (const targetEditor of [editorLeft, editorRight]) {
-          Editor.withoutNormalizing(targetEditor, () => {
-            const matches: Path[] = [];
-            for (const [node, path] of Node.nodes(targetEditor)) {
-              if (Element.isElement(node) && typeof (node as any).hovertag === "number") {
-                if (tagsToRemove.has((node as any).hovertag)) {
-                  matches.push(path);
-                }
-              }
-            }
-            // パスが変わらないように後ろから適用
-            for (const path of [...matches].reverse()) {
-              Transforms.setNodes(targetEditor, { hovertag: null } as any, { at: path });
-            }
-
-            // すべてのエディタから insertHighlight マークを解除する
-            for (const [node, path] of Node.nodes(targetEditor)) {
-              if (Text.isText(node) && (node as any).insertHighlight) {
-                Transforms.unsetNodes(targetEditor, "insertHighlight", { at: path });
-              }
-            }
-          });
-        }
-
+        handleRemoveHighlight();
         return;
       }
 
@@ -676,7 +704,7 @@ export default function Home() {
       event.preventDefault();
       editor.insertText("\n");
     }
-  }, [mode, editorLeft, editorRight, showToast]);
+  }, [mode, handleInsertHighlight, handleRemoveHighlight]);
 
   return (
     <ModeContext.Provider value={mode}>
@@ -705,288 +733,404 @@ export default function Home() {
         {/* ヘッダー部分 */}
         <header style={{
           display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          flexWrap: "wrap",
-          gap: "1rem",
-          padding: "0.75rem 2rem", // 上下の余白を少し減らす
+          flexDirection: "column",
           borderBottom: `4px double ${COLOR_BLACK}`, // 二本線かつ少し太い境界線
           backgroundColor: COLOR_WHITE,
-          position: "relative", // メニューの絶対配置基準
         }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-            {/* ハンバーガーボタン */}
-            <button
-              ref={menuButtonRef}
-              onClick={() => setIsMenuOpen(prev => !prev)}
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                justifyContent: "space-around",
-                width: "28px",
-                height: "20px",
-                background: "transparent",
-                border: "none",
-                cursor: "pointer",
-                padding: 0,
-                zIndex: 101,
-              }}
-              aria-label="Menu"
-            >
-              <div style={{
-                width: "24px",
-                height: "3px",
-                backgroundColor: COLOR_BLACK,
-                transition: "transform 0.2s, opacity 0.2s",
-                transform: isMenuOpen ? "translateY(6px) rotate(45deg)" : "none",
-              }} />
-              <div style={{
-                width: "24px",
-                height: "3px",
-                backgroundColor: COLOR_BLACK,
-                transition: "opacity 0.2s",
-                opacity: isMenuOpen ? 0 : 1,
-              }} />
-              <div style={{
-                width: "24px",
-                height: "3px",
-                backgroundColor: COLOR_BLACK,
-                transition: "transform 0.2s, opacity 0.2s",
-                transform: isMenuOpen ? "translateY(-5px) rotate(-45deg)" : "none",
-              }} />
-            </button>
+          {/* 1段目 */}
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "1rem",
+            padding: "0.75rem 2rem 0.25rem 2rem", // 下の余白を少し減らす
+            position: "relative", // メニューの絶対配置基準
+            width: "100%",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
+              {/* ハンバーガーボタン */}
+              <button
+                ref={menuButtonRef}
+                onClick={() => setIsMenuOpen(prev => !prev)}
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "space-around",
+                  width: "28px",
+                  height: "20px",
+                  background: "transparent",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: 0,
+                  zIndex: 101,
+                }}
+                aria-label="Menu"
+              >
+                <div style={{
+                  width: "24px",
+                  height: "3px",
+                  backgroundColor: COLOR_BLACK,
+                  transition: "transform 0.2s, opacity 0.2s",
+                  transform: isMenuOpen ? "translateY(6px) rotate(45deg)" : "none",
+                }} />
+                <div style={{
+                  width: "24px",
+                  height: "3px",
+                  backgroundColor: COLOR_BLACK,
+                  transition: "opacity 0.2s",
+                  opacity: isMenuOpen ? 0 : 1,
+                }} />
+                <div style={{
+                  width: "24px",
+                  height: "3px",
+                  backgroundColor: COLOR_BLACK,
+                  transition: "transform 0.2s, opacity 0.2s",
+                  transform: isMenuOpen ? "translateY(-5px) rotate(-45deg)" : "none",
+                }} />
+              </button>
 
-            {/* ロゴの表示 */}
-            <div style={{ position: "relative", width: "40px", height: "40px" }}>
-              <Image
-                src="/images/LOGO.png"
-                alt="DoubleApple Logo"
-                width={40}
-                height={40}
-                style={{ objectFit: "contain" }}
-                priority
-              />
-            </div>
-            <h1 style={{
-              fontSize: "1.75rem",
-              fontWeight: "800",
-              letterSpacing: "-0.05em",
-              margin: 0,
-            }}>
-              DoubleApple
-            </h1>
-          </div>
-
-          {/* モード選択インジケーター */}
-          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-            {[
-              { id: "edit", label: "編集モード", shortcut: "Tab" },
-              { id: "match", label: "対応モード", shortcut: "Tab" },
-            ].map((item) => {
-              const isActive = mode === item.id;
-              return (
-                <div
-                  key={item.id}
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    padding: "0.4rem 0.8rem",
-                    border: `1.5px solid ${COLOR_BLACK}`,
-                    borderRadius: "4px",
-                    backgroundColor: isActive ? COLOR_BLACK : COLOR_WHITE,
-                    color: isActive ? COLOR_WHITE : COLOR_BLACK,
-                    fontWeight: isActive ? "700" : "400",
-                    fontSize: "0.85rem",
-                    transition: "all 0.15s ease-in-out",
-                    minWidth: "120px",
-                    textAlign: "center",
-                  }}
-                >
-                  <span>{item.label}</span>
-                  <span style={{
-                    fontSize: "0.65rem",
-                    opacity: 0.7,
-                    marginTop: "0.1rem",
-                    color: isActive ? COLOR_WHITE : "#666"
-                  }}>
-                    {item.shortcut}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* 縦連結ハンバーガーメニュー */}
-          {isMenuOpen && (
-            <div
-              ref={menuRef}
-              style={{
-                position: "absolute",
-                top: "100%",
-                left: "2rem",
-                display: "flex",
-                flexDirection: "row",
-                alignItems: "flex-start",
-                zIndex: 100,
-                marginTop: "0.25rem",
-              }}
-            >
-              {/* メインメニュー項目 */}
-              <div style={{
-                display: "flex",
-                flexDirection: "column",
-                backgroundColor: COLOR_WHITE,
-                boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
-              }}>
-                {[
-                  { label: "Import", onClick: () => { setIsMenuOpen(false); handleImportButtonClick(); } },
-                  { label: "Export", onClick: () => { setIsMenuOpen(false); handleExport(); } },
-                  { label: "Button A", onClick: () => { setIsMenuOpen(false); showToast("Button A がクリックされました"); } },
-                  { label: "Button B", onClick: () => { setIsMenuOpen(false); showToast("Button B がクリックされました"); } },
-                  { label: "Button C", onClick: () => { setIsMenuOpen(false); showToast("Button C がクリックされました"); } },
-                  {
-                    label: `Theme Settings ▶`,
-                    onClick: () => setIsThemeEditorOpen(prev => !prev),
-                    isActive: isThemeEditorOpen
-                  },
-                ].map((btn, index) => {
-                  const isActive = btn.isActive;
-                  return (
-                    <button
-                      key={btn.label}
-                      onClick={btn.onClick}
-                      style={{
-                        width: "180px", // 横長の直方体
-                        height: "44px",
-                        border: `2px solid ${COLOR_BLACK}`,
-                        // 隣接するボタンの境界線が重なって太くなるのを防ぐため、2番目以降のボタンの borderTop を "none" にする
-                        borderTop: index === 0 ? `2px solid ${COLOR_BLACK}` : "none",
-                        backgroundColor: isActive ? COLOR_BLACK : COLOR_WHITE,
-                        color: isActive ? COLOR_WHITE : COLOR_BLACK,
-                        fontSize: "0.9rem",
-                        fontWeight: "700",
-                        cursor: "pointer",
-                        textAlign: "left",
-                        padding: "0 1.25rem",
-                        transition: "all 0.15s ease-in-out",
-                        display: "flex",
-                        alignItems: "center",
-                      }}
-                      onMouseEnter={(e) => {
-                        if (!isActive) {
-                          e.currentTarget.style.backgroundColor = COLOR_BLACK;
-                          e.currentTarget.style.color = COLOR_WHITE;
-                        }
-                      }}
-                      onMouseLeave={(e) => {
-                        if (!isActive) {
-                          e.currentTarget.style.backgroundColor = COLOR_WHITE;
-                          e.currentTarget.style.color = COLOR_BLACK;
-                        }
-                      }}
-                    >
-                      {btn.label}
-                    </button>
-                  );
-                })}
+              {/* ロゴの表示 */}
+              <div style={{ position: "relative", width: "40px", height: "40px" }}>
+                <Image
+                  src="/images/LOGO.png"
+                  alt="DoubleApple Logo"
+                  width={40}
+                  height={40}
+                  style={{ objectFit: "contain" }}
+                  priority
+                />
               </div>
+              <h1 style={{
+                fontSize: "1.75rem",
+                fontWeight: "800",
+                letterSpacing: "-0.05em",
+                margin: 0,
+              }}>
+                DoubleApple
+              </h1>
+            </div>
 
-              {/* テーマ色の各ピッカー（右展開） */}
-              {isThemeEditorOpen && (
+            {/* モード選択インジケーター */}
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+              {[
+                { id: "edit", label: "編集モード", shortcut: "Tab" },
+                { id: "match", label: "対応モード", shortcut: "Tab" },
+              ].map((item) => {
+                const isActive = mode === item.id;
+                return (
+                  <div
+                    key={item.id}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      padding: "0.4rem 0.8rem",
+                      border: `1.5px solid ${COLOR_BLACK}`,
+                      borderRadius: "4px",
+                      backgroundColor: isActive ? COLOR_BLACK : COLOR_WHITE,
+                      color: isActive ? COLOR_WHITE : COLOR_BLACK,
+                      fontWeight: isActive ? "700" : "400",
+                      fontSize: "0.85rem",
+                      transition: "all 0.15s ease-in-out",
+                      minWidth: "120px",
+                      textAlign: "center",
+                    }}
+                  >
+                    <span>{item.label}</span>
+                    <span style={{
+                      fontSize: "0.65rem",
+                      opacity: 0.7,
+                      marginTop: "0.1rem",
+                      color: isActive ? COLOR_WHITE : "#666"
+                    }}>
+                      {item.shortcut}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* 縦連結ハンバーガーメニュー */}
+            {isMenuOpen && (
+              <div
+                ref={menuRef}
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  left: "2rem",
+                  display: "flex",
+                  flexDirection: "row",
+                  alignItems: "flex-start",
+                  zIndex: 100,
+                  marginTop: "0.25rem",
+                }}
+              >
+                {/* メインメニュー項目 */}
                 <div style={{
                   display: "flex",
                   flexDirection: "column",
                   backgroundColor: COLOR_WHITE,
                   boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
-                  marginLeft: "-2px", // メインメニューの右ボーダーと重ねる
                 }}>
                   {[
-                    { key: "black", label: "Text & Line" },
-                    { key: "white", label: "App Bg" },
-                    { key: "editorBg", label: "Editor Bg" },
-                    { key: "hoverHighlightBg", label: "Hover Bg" },
-                    { key: "hoverHighlightText", label: "Hover Text" },
-                    { key: "insertHighlightBg", label: "Insert Bg" },
-                    { key: "insertHighlightText", label: "Insert Text" },
-                  ].map((item, index) => {
+                    { label: "Import", onClick: () => { setIsMenuOpen(false); handleImportButtonClick(); } },
+                    { label: "Export", onClick: () => { setIsMenuOpen(false); handleExport(); } },
+                    { label: "Button A", onClick: () => { setIsMenuOpen(false); showToast("Button A がクリックされました"); } },
+                    { label: "Button B", onClick: () => { setIsMenuOpen(false); showToast("Button B がクリックされました"); } },
+                    { label: "Button C", onClick: () => { setIsMenuOpen(false); showToast("Button C がクリックされました"); } },
+                    {
+                      label: `色設定 ▶`,
+                      onClick: () => setIsThemeEditorOpen(prev => !prev),
+                      isActive: isThemeEditorOpen
+                    },
+                  ].map((btn, index) => {
+                    const isActive = btn.isActive;
                     return (
-                      <div
-                        key={item.key}
+                      <button
+                        key={btn.label}
+                        onClick={btn.onClick}
                         style={{
-                          width: "180px",
+                          width: "180px", // 横長の直方体
                           height: "44px",
                           border: `2px solid ${COLOR_BLACK}`,
+                          // 隣接するボタンの境界線が重なって太くなるのを防ぐため、2番目以降のボタンの borderTop を "none" にする
                           borderTop: index === 0 ? `2px solid ${COLOR_BLACK}` : "none",
-                          backgroundColor: COLOR_WHITE,
-                          color: COLOR_BLACK,
-                          fontSize: "0.85rem",
+                          backgroundColor: isActive ? COLOR_BLACK : COLOR_WHITE,
+                          color: isActive ? COLOR_WHITE : COLOR_BLACK,
+                          fontSize: "0.9rem",
                           fontWeight: "700",
+                          cursor: "pointer",
+                          textAlign: "left",
                           padding: "0 1.25rem",
+                          transition: "all 0.15s ease-in-out",
                           display: "flex",
                           alignItems: "center",
-                          justifyContent: "space-between",
-                          boxSizing: "border-box",
+                        }}
+                        onMouseEnter={(e) => {
+                          if (!isActive) {
+                            e.currentTarget.style.backgroundColor = COLOR_BLACK;
+                            e.currentTarget.style.color = COLOR_WHITE;
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          if (!isActive) {
+                            e.currentTarget.style.backgroundColor = COLOR_WHITE;
+                            e.currentTarget.style.color = COLOR_BLACK;
+                          }
                         }}
                       >
-                        <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>{item.label}</span>
-                        <input
-                          type="color"
-                          value={(theme as any)[item.key]}
-                          onChange={(e) => {
-                            setTheme(prev => ({
-                              ...prev,
-                              [item.key]: e.target.value
-                            }));
-                          }}
-                          style={{
-                            border: "none",
-                            width: "24px",
-                            height: "24px",
-                            padding: 0,
-                            backgroundColor: "transparent",
-                            cursor: "pointer",
-                            outline: "none",
-                          }}
-                        />
-                      </div>
+                        {btn.label}
+                      </button>
                     );
                   })}
-                  {/* Reset ボタン */}
-                  <button
-                    onClick={() => {
-                      setTheme(defaultTheme);
-                      showToast("テーマを初期値に戻しました");
-                    }}
-                    style={{
-                      width: "180px",
-                      height: "44px",
-                      border: `2px solid ${COLOR_BLACK}`,
-                      borderTop: "none",
-                      backgroundColor: COLOR_WHITE,
-                      color: COLOR_BLACK,
-                      fontSize: "0.85rem",
-                      fontWeight: "700",
-                      cursor: "pointer",
-                      textAlign: "center",
-                      padding: "0 1.25rem",
-                      transition: "all 0.15s ease-in-out",
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.backgroundColor = COLOR_BLACK;
-                      e.currentTarget.style.color = COLOR_WHITE;
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.backgroundColor = COLOR_WHITE;
-                      e.currentTarget.style.color = COLOR_BLACK;
-                    }}
-                  >
-                    Reset
-                  </button>
                 </div>
-              )}
-            </div>
-          )}
+
+                {/* テーマ色の各ピッカー（右展開） */}
+                {isThemeEditorOpen && (
+                  <div style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    backgroundColor: COLOR_WHITE,
+                    boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+                    marginLeft: "-2px", // メインメニューの右ボーダーと重ねる
+                  }}>
+                    {[
+                      { key: "black", label: "文字と装飾色" },
+                      { key: "white", label: "アプリ背景色" },
+                      { key: "editorBg", label: "入力欄背景色" },
+                      { key: "hoverHighlightBg", label: "強調背景色" },
+                      { key: "hoverHighlightText", label: "強調文字色" },
+                      { key: "insertHighlightBg", label: "挿入背景色" },
+                      { key: "insertHighlightText", label: "挿入文字色" },
+                    ].map((item, index) => {
+                      return (
+                        <div
+                          key={item.key}
+                          style={{
+                            width: "180px",
+                            height: "44px",
+                            border: `2px solid ${COLOR_BLACK}`,
+                            borderTop: index === 0 ? `2px solid ${COLOR_BLACK}` : "none",
+                            backgroundColor: COLOR_WHITE,
+                            color: COLOR_BLACK,
+                            fontSize: "0.85rem",
+                            fontWeight: "700",
+                            padding: "0 1.25rem",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            boxSizing: "border-box",
+                          }}
+                        >
+                          <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>{item.label}</span>
+                          <input
+                            type="color"
+                            value={(theme as any)[item.key]}
+                            onChange={(e) => {
+                              setTheme(prev => ({
+                                ...prev,
+                                [item.key]: e.target.value
+                              }));
+                            }}
+                            style={{
+                              border: "none",
+                              width: "24px",
+                              height: "24px",
+                              padding: 0,
+                              backgroundColor: "transparent",
+                              cursor: "pointer",
+                              outline: "none",
+                            }}
+                          />
+                        </div>
+                      );
+                    })}
+                    {/* Reset ボタン */}
+                    <button
+                      onClick={() => {
+                        setTheme(defaultTheme);
+                        showToast("テーマを初期値に戻しました");
+                      }}
+                      style={{
+                        width: "180px",
+                        height: "44px",
+                        border: `2px solid ${COLOR_BLACK}`,
+                        borderTop: "none",
+                        backgroundColor: COLOR_WHITE,
+                        color: COLOR_BLACK,
+                        fontSize: "0.85rem",
+                        fontWeight: "700",
+                        cursor: "pointer",
+                        textAlign: "center",
+                        padding: "0 1.25rem",
+                        transition: "all 0.15s ease-in-out",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = COLOR_BLACK;
+                        e.currentTarget.style.color = COLOR_WHITE;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = COLOR_WHITE;
+                        e.currentTarget.style.color = COLOR_BLACK;
+                      }}
+                    >
+                      Reset
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* 2段目: コマンド表示領域 */}
+          <div style={{
+            padding: "0.6rem 2rem 0.6rem 2rem", // 上下の余白を十分に確保
+            fontSize: "0.85rem",
+            color: COLOR_BLACK,
+            display: "flex",
+            justifyContent: "center", // 中央寄せ
+            gap: "2.5rem",
+            visibility: mode === "match" ? "visible" : "hidden",
+            height: "3.2rem", // 高さを広げてボタンが二重境界線に重ならないように調整
+            alignItems: "center",
+            boxSizing: "border-box",
+          }}>
+            <button
+              onClick={handleInsertHighlight}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                background: "transparent",
+                border: `1px solid ${COLOR_BLACK}`, // 枠線を細く
+                borderRadius: "4px",
+                padding: "0.3rem 0.8rem",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                fontSize: "0.85rem",
+                fontWeight: "700",
+                color: COLOR_BLACK,
+                transition: "all 0.15s ease-in-out",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = COLOR_BLACK;
+                e.currentTarget.style.color = COLOR_WHITE;
+                const keycap = e.currentTarget.querySelector(".keycap") as HTMLElement;
+                if (keycap) {
+                  keycap.style.backgroundColor = COLOR_WHITE;
+                  keycap.style.color = COLOR_BLACK;
+                }
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = "transparent";
+                e.currentTarget.style.color = COLOR_BLACK;
+                const keycap = e.currentTarget.querySelector(".keycap") as HTMLElement;
+                if (keycap) {
+                  keycap.style.backgroundColor = COLOR_BLACK;
+                  keycap.style.color = COLOR_WHITE;
+                }
+              }}
+            >
+              <span>挿入</span>
+              <span className="keycap" style={{
+                backgroundColor: COLOR_BLACK,
+                color: COLOR_WHITE,
+                padding: "0.1rem 0.35rem",
+                borderRadius: "3px",
+                fontSize: "0.7rem",
+                fontWeight: "700",
+                transition: "all 0.15s ease-in-out",
+              }}>Ctrl + Enter</span>
+            </button>
+            <button
+              onClick={handleRemoveHighlight}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                background: "transparent",
+                border: `1px solid ${COLOR_BLACK}`, // 枠線を細く
+                borderRadius: "4px",
+                padding: "0.3rem 0.8rem",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                fontSize: "0.85rem",
+                fontWeight: "700",
+                color: COLOR_BLACK,
+                transition: "all 0.15s ease-in-out",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = COLOR_BLACK;
+                e.currentTarget.style.color = COLOR_WHITE;
+                const keycap = e.currentTarget.querySelector(".keycap") as HTMLElement;
+                if (keycap) {
+                  keycap.style.backgroundColor = COLOR_WHITE;
+                  keycap.style.color = COLOR_BLACK;
+                }
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = "transparent";
+                e.currentTarget.style.color = COLOR_BLACK;
+                const keycap = e.currentTarget.querySelector(".keycap") as HTMLElement;
+                if (keycap) {
+                  keycap.style.backgroundColor = COLOR_BLACK;
+                  keycap.style.color = COLOR_WHITE;
+                }
+              }}
+            >
+              <span>挿入選択解除</span>
+              <span className="keycap" style={{
+                backgroundColor: COLOR_BLACK,
+                color: COLOR_WHITE,
+                padding: "0.1rem 0.35rem",
+                borderRadius: "3px",
+                fontSize: "0.7rem",
+                fontWeight: "700",
+                transition: "all 0.15s ease-in-out",
+              }}>Ctrl + -</span>
+            </button>
+          </div>
         </header>
 
         {/* メインの左右スプリットビュー */}
