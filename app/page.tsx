@@ -309,6 +309,9 @@ export default function Home() {
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const [theme, setTheme] = useState<Theme>(defaultTheme);
   const [isThemeEditorOpen, setIsThemeEditorOpen] = useState(false);
+  const [isFileInsertOpen, setIsFileInsertOpen] = useState(false);
+  const fileInsertInputRef = useRef<HTMLInputElement>(null);
+  const activeInsertTargetRef = useRef<"left" | "right">("left");
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -321,6 +324,7 @@ export default function Home() {
       ) {
         setIsMenuOpen(false);
         setIsThemeEditorOpen(false);
+        setIsFileInsertOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -350,13 +354,22 @@ export default function Home() {
         event.preventDefault();
         setMode((prev) => (prev === "edit" ? "match" : "edit"));
       }
+
+      // Ctrl + Shift + D でエディタ状態をダンプ
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === "d" || event.key === "D")) {
+        event.preventDefault();
+        console.log("=== DoubleApple Editor States ===");
+        console.log("Left Editor (Editor A) State:", JSON.parse(JSON.stringify(valueLeft)));
+        console.log("Right Editor (Editor B) State:", JSON.parse(JSON.stringify(valueRight)));
+        console.log("=================================");
+      }
     };
 
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => {
       window.removeEventListener("keydown", handleGlobalKeyDown);
     };
-  }, []);
+  }, [valueLeft, valueRight]);
 
 
 
@@ -491,6 +504,78 @@ export default function Home() {
     reader.readAsText(file);
     event.target.value = "";
   }, [showToast]);
+
+  const handleFileInsertClick = useCallback((target: "left" | "right") => {
+    activeInsertTargetRef.current = target;
+    setIsMenuOpen(false);
+    setIsFileInsertOpen(false);
+    setIsThemeEditorOpen(false);
+    fileInsertInputRef.current?.click();
+  }, []);
+
+  const handleFileInsertChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const target = activeInsertTargetRef.current;
+    const targetLabel = target === "left" ? "左エディタ" : "右エディタ";
+
+    const confirmed = window.confirm(`${targetLabel}の内容がファイルの内容で完全に上書きされます。よろしいですか？`);
+    if (!confirmed) {
+      event.target.value = "";
+      return;
+    }
+
+    try {
+      let text = "";
+
+      if (file.name.endsWith(".txt")) {
+        text = await file.text();
+      } else if (file.name.endsWith(".pdf")) {
+        const pdfjs = await import("pdfjs-dist");
+        pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+
+        const arrayBuffer = await file.arrayBuffer();
+        const loadingTask = pdfjs.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        let extractedText = "";
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items
+            .map((item: any) => item.str)
+            .join(" ");
+          extractedText += pageText + "\n";
+        }
+        text = extractedText;
+      } else {
+        showToast("未対応のファイル形式です (.txt または .pdf を選択してください)");
+        event.target.value = "";
+        return;
+      }
+
+      const lines = text.split(/\r?\n/);
+      const newValue: Descendant[] = lines.length > 0 && (lines.length > 1 || lines[0] !== "")
+        ? lines.map((line) => ({
+            type: "block",
+            children: [{ text: line }],
+          }))
+        : [{ type: "block", children: [{ text: "" }] }];
+
+      if (target === "left") {
+        setValueLeft(newValue);
+      } else {
+        setValueRight(newValue);
+      }
+      setImportKey((prev) => prev + 1);
+      showToast(`${targetLabel}をファイル内容で上書きしました`);
+    } catch (err) {
+      console.error(err);
+      showToast("ファイルの読み込みに失敗しました");
+    } finally {
+      event.target.value = "";
+    }
+  }, [showToast, setValueLeft, setValueRight]);
 
   // HighlightManagerの初期化（エディタをキャッシュ）
   useEffect(() => {
@@ -661,6 +746,330 @@ export default function Home() {
     });
   }, [editorLeft, editorRight]);
 
+  // 対応モード中の拡張アクション (既存タグの拡張)
+  const handleExtendHighlight = useCallback(() => {
+    const rangeLeft = getInsertHighlightRange(editorLeft);
+    const rangeRight = getInsertHighlightRange(editorRight);
+
+    if (!rangeLeft && !rangeRight) {
+      showToast("拡張する範囲が選択されていません");
+      return;
+    }
+
+    // 拡張対象となるタグIDを特定するヘルパー
+    const getExtendTargetTag = (editor: Editor, range: typeof rangeLeft) => {
+      if (!range) return null;
+
+      // 選択範囲を完全に囲む直近の親タグのパスを特定する
+      let parentTagPath: Path | null = null;
+      for (const [, ancestorPath] of Node.ancestors(editor, range.selectionStart.path)) {
+        const ancestorNode = Node.get(editor, ancestorPath);
+        if (
+          Element.isElement(ancestorNode) &&
+          editor.isInline(ancestorNode) &&
+          typeof (ancestorNode as any).hovertag === "number"
+        ) {
+          parentTagPath = ancestorPath;
+          break; // 最も内側の親タグ
+        }
+      }
+
+      // 親タグが存在しなければエディタのルート
+      const searchPath = parentTagPath || [];
+
+      // 親タグから見たすべての既存の子孫タグを取得 (自分自身は除外)
+      const allHovertagNodes = Array.from(
+        Editor.nodes(editor, {
+          at: searchPath,
+          match: (n, p) =>
+            Element.isElement(n) &&
+            editor.isInline(n) &&
+            typeof (n as any).hovertag === "number" &&
+            !Path.equals(p, searchPath),
+        })
+      );
+
+      const matchedEntries: { node: any; path: Path; editor: Editor }[] = [];
+
+      // 1. 選択範囲の内部に存在する hovertag ノードをスキャン
+      for (const [node, path] of allHovertagNodes) {
+        const start = Editor.start(editor, path);
+        const end = Editor.end(editor, path);
+
+        const isIntersecting =
+          (!Point.isBefore(range.selectionStart, start) && !Point.isAfter(range.selectionStart, end)) ||
+          (!Point.isBefore(range.selectionEnd, start) && !Point.isAfter(range.selectionEnd, end)) ||
+          (!Point.isBefore(start, range.selectionStart) && !Point.isAfter(end, range.selectionEnd));
+
+        if (isIntersecting) {
+          matchedEntries.push({ node, path, editor });
+        }
+      }
+
+      // 2. 選択範囲内に既存タグがない場合 ➡ 隣接する場所（左隣・右隣）を検索する
+      if (matchedEntries.length === 0) {
+        for (const [node, path] of allHovertagNodes) {
+          const start = Editor.start(editor, path);
+          const end = Editor.end(editor, path);
+
+          // 左隣の判定: ノードの終了点 `end` から選択開始点 `range.selectionStart` までの実質テキストが空
+          if (Point.isBefore(end, range.selectionStart) || Point.equals(end, range.selectionStart)) {
+            const betweens = Editor.string(editor, { anchor: end, focus: range.selectionStart });
+            if (betweens === "") {
+              matchedEntries.push({ node, path, editor });
+            }
+          }
+
+          // 右隣の判定: 選択終了点 `range.selectionEnd` からノードの開始点 `start` までの実質テキストが空
+          if (Point.isBefore(range.selectionEnd, start) || Point.equals(range.selectionEnd, start)) {
+            const betweens = Editor.string(editor, { anchor: range.selectionEnd, focus: start });
+            if (betweens === "") {
+              matchedEntries.push({ node, path, editor });
+            }
+          }
+        }
+      }
+
+      if (matchedEntries.length === 0) return null;
+
+      // 3. 親子関係のフィルタリング（最も階層が「上」のものを残し、その子孫を除外する）
+      matchedEntries.sort((a, b) => a.path.length - b.path.length); // 浅い順 (階層が上のものが先)
+
+      const selectedEntries: typeof matchedEntries = [];
+      for (const entry of matchedEntries) {
+        // すでに採用された浅いノード（selected）が、今回のノード（entry）の祖先である場合は無視する
+        const isDescendantOfAlreadySelected = selectedEntries.some(
+          (selected) =>
+            selected.editor === entry.editor &&
+            Path.isAncestor(selected.path, entry.path)
+        );
+        if (!isDescendantOfAlreadySelected) {
+          selectedEntries.push(entry);
+        }
+      }
+
+      // 4. ユニークなタグIDを集計
+      const uniqueTags = new Set<number>();
+      for (const entry of selectedEntries) {
+        uniqueTags.add((entry.node as any).hovertag as number);
+      }
+
+      if (uniqueTags.size === 0) return null;
+      if (uniqueTags.size > 1) {
+        return -1; // 複数検出時はエラーを表す -1 を返す
+      }
+
+      return Array.from(uniqueTags)[0];
+    };
+
+    const tagLeft = getExtendTargetTag(editorLeft, rangeLeft);
+    const tagRight = getExtendTargetTag(editorRight, rangeRight);
+
+    if (tagLeft === -1 || tagRight === -1) {
+      showToast("複数の異なるタグが検出されたため拡張できません");
+      return;
+    }
+
+    const tags = new Set<number>();
+    if (tagLeft !== null) tags.add(tagLeft);
+    if (tagRight !== null) tags.add(tagRight);
+
+    if (tags.size === 0) {
+      showToast("隣接または重複する既存のタグが見つかりません");
+      return;
+    }
+
+    if (tags.size > 1) {
+      showToast("複数の異なるタグが検出されたため拡張できません");
+      return;
+    }
+
+    const targetTag = Array.from(tags)[0];
+
+    // 親要素の範囲を超えた拡張を制限するバリデーション
+    const validateParentConstraint = (editor: Editor, range: typeof rangeLeft) => {
+      if (!range) return true;
+
+      const matches = Array.from(
+        Editor.nodes(editor, {
+          match: (n) => Element.isElement(n) && editor.isInline(n) && (n as any).hovertag === targetTag,
+        })
+      );
+      if (matches.length === 0) return true;
+
+      for (const [node, path] of matches) {
+        // 親（祖先）に別のタグ（hovertag が number）があるか探す
+        let parentTagPath: Path | null = null;
+        for (const [ancestorNode, ancestorPath] of Node.ancestors(editor, path)) {
+          if (
+            Element.isElement(ancestorNode) &&
+            editor.isInline(ancestorNode) &&
+            typeof (ancestorNode as any).hovertag === "number"
+          ) {
+            parentTagPath = ancestorPath;
+            break;
+          }
+        }
+
+        if (parentTagPath) {
+          const parentStart = Editor.start(editor, parentTagPath);
+          const parentEnd = Editor.end(editor, parentTagPath);
+
+          const targetStart = Editor.start(editor, path);
+          const targetEnd = Editor.end(editor, path);
+
+          // 拡張後の全体の範囲（現在のtargetTagの範囲と、新しく追加するrangeの範囲を合わせた全領域）
+          const newStart = Point.isBefore(range.selectionStart, targetStart) ? range.selectionStart : targetStart;
+          const newEnd = Point.isAfter(range.selectionEnd, targetEnd) ? range.selectionEnd : targetEnd;
+
+          // 親の範囲 [parentStart, parentEnd] からはみ出していないか検証
+          if (Point.isBefore(newStart, parentStart) || Point.isAfter(newEnd, parentEnd)) {
+            return false; // 制約違反
+          }
+        }
+      }
+      return true;
+    };
+
+    if (!validateParentConstraint(editorLeft, rangeLeft) || !validateParentConstraint(editorRight, rangeRight)) {
+      showToast("親要素の範囲を超えて拡張することはできません");
+      return;
+    }
+
+    // 適用
+    if (rangeLeft) {
+      applyHighlightTransform(editorLeft, targetTag);
+    }
+    if (rangeRight) {
+      applyHighlightTransform(editorRight, targetTag);
+    }
+    showToast("タグの範囲を拡張しました");
+  }, [editorLeft, editorRight, showToast]);
+
+  // 対応モード中の完全削除アクション (タグの完全消去)
+  const handleDeleteHighlight = useCallback(() => {
+    const matchedEntries: { node: any; path: Path; editor: Editor }[] = [];
+
+    // 優先1: insertHighlight（選択範囲）からノードを特定
+    const rangeLeft = getInsertHighlightRange(editorLeft);
+    const rangeRight = getInsertHighlightRange(editorRight);
+
+    const collectEntriesFromRange = (editor: Editor, range: typeof rangeLeft) => {
+      if (!range) return;
+      const nodes = Editor.nodes(editor, {
+        at: { anchor: range.selectionStart, focus: range.selectionEnd },
+        match: (n) => Element.isElement(n) && editor.isInline(n) && typeof (n as any).hovertag === "number",
+      });
+      for (const [node, path] of nodes) {
+        matchedEntries.push({ node, path, editor });
+      }
+    };
+
+    collectEntriesFromRange(editorLeft, rangeLeft);
+    collectEntriesFromRange(editorRight, rangeRight);
+
+    // 優先2: 選択範囲がない場合、現在フォーカスがあるエディタのカーソル位置から特定
+    if (matchedEntries.length === 0) {
+      const activeEditor = isFocusedLeft ? editorLeft : (isFocusedRight ? editorRight : null);
+      if (activeEditor && activeEditor.selection) {
+        const nodes = Editor.nodes(activeEditor, {
+          at: activeEditor.selection,
+          match: (n) => Element.isElement(n) && activeEditor.isInline(n) && typeof (n as any).hovertag === "number",
+        });
+        for (const [node, path] of nodes) {
+          matchedEntries.push({ node, path, editor: activeEditor });
+        }
+      }
+    }
+
+    // 優先3: それでも見つからない場合、両方のエディタの現在の選択範囲から特定
+    if (matchedEntries.length === 0) {
+      for (const editor of [editorLeft, editorRight]) {
+        if (editor.selection) {
+          const nodes = Editor.nodes(editor, {
+            at: editor.selection,
+            match: (n) => Element.isElement(n) && editor.isInline(n) && typeof (n as any).hovertag === "number",
+          });
+          for (const [node, path] of nodes) {
+            matchedEntries.push({ node, path, editor });
+          }
+        }
+      }
+    }
+
+    if (matchedEntries.length === 0) {
+      showToast("削除対象のタグが特定できません");
+      return;
+    }
+
+    // 階層（パスの長さ）で降順ソート（深い子孫ノードが先に来るようにする）
+    matchedEntries.sort((a, b) => b.path.length - a.path.length);
+
+    // 親子関係にあるものをフィルタリングする
+    // 深い順から処理し、すでに採用された子の祖先であるノード（＝同じエディタ内で、パスが前方一致するもの）は無視する
+    const selectedEntries: typeof matchedEntries = [];
+    for (const entry of matchedEntries) {
+      const isAncestorOfAlreadySelected = selectedEntries.some(
+        (selected) =>
+          selected.editor === entry.editor &&
+          Path.isAncestor(entry.path, selected.path)
+      );
+      if (!isAncestorOfAlreadySelected) {
+        selectedEntries.push(entry);
+      }
+    }
+
+    // フィルタリング後に残ったタグIDのユニーク数を集計
+    const finalTags = new Set<number>();
+    for (const entry of selectedEntries) {
+      finalTags.add((entry.node as any).hovertag as number);
+    }
+
+    if (finalTags.size === 0) {
+      showToast("削除対象のタグが特定できません");
+      return;
+    }
+
+    // 複数種類存在する場合は、誤操作を防ぐためにキャンセルしてトースト表示
+    if (finalTags.size > 1) {
+      showToast("複数の異なるタグを同時に削除することはできません");
+      return;
+    }
+
+    const targetTag = Array.from(finalTags)[0];
+
+    // 削除処理の実行 (対象IDの解除と黄緑ハイライトのクリーンアップ)
+    Editor.withoutNormalizing(editorLeft, () => {
+      Editor.withoutNormalizing(editorRight, () => {
+        for (const editor of [editorLeft, editorRight]) {
+          const paths: Path[] = [];
+          for (const [node, path] of Node.nodes(editor)) {
+            if (
+              Element.isElement(node) &&
+              editor.isInline(node) &&
+              typeof (node as any).hovertag === "number" &&
+              (node as any).hovertag === targetTag
+            ) {
+              paths.push(path);
+            }
+          }
+          for (const path of [...paths].reverse()) {
+            Transforms.setNodes(editor, { hovertag: null } as any, { at: path });
+          }
+
+          // タグ削除後、該当エディタのすべてのテキストノードから insertHighlight を解除する
+          for (const [node, path] of Node.nodes(editor)) {
+            if (Text.isText(node) && (node as any).insertHighlight) {
+              Transforms.unsetNodes(editor, "insertHighlight", { at: path });
+            }
+          }
+        }
+      });
+    });
+
+    showToast("タグを削除しました");
+  }, [editorLeft, editorRight, isFocusedLeft, isFocusedRight, showToast]);
+
   // キー入力ハンドラー
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>, editor: ReactEditor & BaseEditor) => {
     if (mode !== "edit") {
@@ -680,15 +1089,31 @@ export default function Home() {
         return;
       }
 
-      // 対応モード中の Ctrl+Enter: insertHighlight を hovertag inline ノードに変換
-      if (mode === "match" && isCmdOrCtrl && event.key === "Enter") {
+      // 対応モード中の Ctrl + Shift + Enter: 既存タグの拡張
+      if (mode === "match" && isCmdOrCtrl && event.shiftKey && event.key === "Enter") {
+        event.preventDefault();
+        handleExtendHighlight();
+        return;
+      }
+
+      // 対応モード中の Ctrl+Enter: insertHighlight を hovertag inline ノードに変換 (Shiftがない場合)
+      if (mode === "match" && isCmdOrCtrl && !event.shiftKey && event.key === "Enter") {
         event.preventDefault();
         handleInsertHighlight();
         return;
       }
 
-      // 対応モード中の Ctrl + - : 左右のエディタの選択範囲と重なる hovertag を持つノードのハイライトを解除
-      if (mode === "match" && isCmdOrCtrl && event.key === "-") {
+      const isMinusKey = event.key === "-" || event.code === "Minus" || event.code === "NumpadSubtract";
+
+      // 対応モード中の Ctrl + Shift + - : タグ自体の完全削除
+      if (mode === "match" && isCmdOrCtrl && event.shiftKey && isMinusKey) {
+        event.preventDefault();
+        handleDeleteHighlight();
+        return;
+      }
+
+      // 対応モード中の Ctrl + - : 左右のエディタの選択範囲と重なる hovertag を持つノードのハイライトを解除 (Shiftがない場合)
+      if (mode === "match" && isCmdOrCtrl && !event.shiftKey && isMinusKey) {
         event.preventDefault();
         handleRemoveHighlight();
         return;
@@ -704,7 +1129,7 @@ export default function Home() {
       event.preventDefault();
       editor.insertText("\n");
     }
-  }, [mode, handleInsertHighlight, handleRemoveHighlight]);
+  }, [mode, handleInsertHighlight, handleRemoveHighlight, handleExtendHighlight, handleDeleteHighlight]);
 
   return (
     <ModeContext.Provider value={mode}>
@@ -713,6 +1138,13 @@ export default function Home() {
         ref={fileInputRef}
         onChange={handleFileChange}
         accept=".dapl"
+        style={{ display: "none" }}
+      />
+      <input
+        type="file"
+        ref={fileInsertInputRef}
+        onChange={handleFileInsertChange}
+        accept=".txt,.pdf"
         style={{ display: "none" }}
       />
       <div style={{
@@ -819,8 +1251,9 @@ export default function Home() {
               ].map((item) => {
                 const isActive = mode === item.id;
                 return (
-                  <div
+                  <button
                     key={item.id}
+                    onClick={() => setMode(item.id as Mode)}
                     style={{
                       display: "flex",
                       flexDirection: "column",
@@ -835,6 +1268,8 @@ export default function Home() {
                       transition: "all 0.15s ease-in-out",
                       minWidth: "120px",
                       textAlign: "center",
+                      cursor: "pointer",
+                      fontFamily: "inherit",
                     }}
                   >
                     <span>{item.label}</span>
@@ -846,7 +1281,7 @@ export default function Home() {
                     }}>
                       {item.shortcut}
                     </span>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -880,8 +1315,19 @@ export default function Home() {
                     { label: "Button B", onClick: () => { setIsMenuOpen(false); showToast("Button B がクリックされました"); } },
                     { label: "Button C", onClick: () => { setIsMenuOpen(false); showToast("Button C がクリックされました"); } },
                     {
+                      label: `ファイル挿入 ▶`,
+                      onClick: () => {
+                        setIsFileInsertOpen(prev => !prev);
+                        setIsThemeEditorOpen(false);
+                      },
+                      isActive: isFileInsertOpen
+                    },
+                    {
                       label: `色設定 ▶`,
-                      onClick: () => setIsThemeEditorOpen(prev => !prev),
+                      onClick: () => {
+                        setIsThemeEditorOpen(prev => !prev);
+                        setIsFileInsertOpen(false);
+                      },
                       isActive: isThemeEditorOpen
                     },
                   ].map((btn, index) => {
@@ -1019,6 +1465,55 @@ export default function Home() {
                     </button>
                   </div>
                 )}
+
+                {/* ファイル挿入の各ターゲット（右展開） */}
+                {isFileInsertOpen && (
+                  <div style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    backgroundColor: COLOR_WHITE,
+                    boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+                    marginLeft: "-2px", // メインメニューの右ボーダーと重ねる
+                  }}>
+                    {[
+                      { label: "左エディタに挿入", target: "left" as const },
+                      { label: "右エディタに挿入", target: "right" as const },
+                    ].map((item, index) => {
+                      return (
+                        <button
+                          key={item.target}
+                          onClick={() => handleFileInsertClick(item.target)}
+                          style={{
+                            width: "180px",
+                            height: "44px",
+                            border: `2px solid ${COLOR_BLACK}`,
+                            borderTop: index === 0 ? `2px solid ${COLOR_BLACK}` : "none",
+                            backgroundColor: COLOR_WHITE,
+                            color: COLOR_BLACK,
+                            fontSize: "0.85rem",
+                            fontWeight: "700",
+                            cursor: "pointer",
+                            textAlign: "left",
+                            padding: "0 1.25rem",
+                            transition: "all 0.15s ease-in-out",
+                            display: "flex",
+                            alignItems: "center",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor = COLOR_BLACK;
+                            e.currentTarget.style.color = COLOR_WHITE;
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = COLOR_WHITE;
+                            e.currentTarget.style.color = COLOR_BLACK;
+                          }}
+                        >
+                          {item.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1030,7 +1525,7 @@ export default function Home() {
             color: COLOR_BLACK,
             display: "flex",
             justifyContent: "center", // 中央寄せ
-            gap: "2.5rem",
+            gap: "1.5rem", // ボタンが増えたため、間隔を少し狭める
             visibility: mode === "match" ? "visible" : "hidden",
             height: "3.2rem", // 高さを広げてボタンが二重境界線に重ならないように調整
             alignItems: "center",
@@ -1072,7 +1567,7 @@ export default function Home() {
                 }
               }}
             >
-              <span>挿入</span>
+              <span>新規挿入</span>
               <span className="keycap" style={{
                 backgroundColor: COLOR_BLACK,
                 color: COLOR_WHITE,
@@ -1082,6 +1577,53 @@ export default function Home() {
                 fontWeight: "700",
                 transition: "all 0.15s ease-in-out",
               }}>Ctrl + Enter</span>
+            </button>
+            <button
+              onClick={handleExtendHighlight}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                background: "transparent",
+                border: `1px solid ${COLOR_BLACK}`, // 枠線を細く
+                borderRadius: "4px",
+                padding: "0.3rem 0.8rem",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                fontSize: "0.85rem",
+                fontWeight: "700",
+                color: COLOR_BLACK,
+                transition: "all 0.15s ease-in-out",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = COLOR_BLACK;
+                e.currentTarget.style.color = COLOR_WHITE;
+                const keycap = e.currentTarget.querySelector(".keycap") as HTMLElement;
+                if (keycap) {
+                  keycap.style.backgroundColor = COLOR_WHITE;
+                  keycap.style.color = COLOR_BLACK;
+                }
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = "transparent";
+                e.currentTarget.style.color = COLOR_BLACK;
+                const keycap = e.currentTarget.querySelector(".keycap") as HTMLElement;
+                if (keycap) {
+                  keycap.style.backgroundColor = COLOR_BLACK;
+                  keycap.style.color = COLOR_WHITE;
+                }
+              }}
+            >
+              <span>範囲拡張</span>
+              <span className="keycap" style={{
+                backgroundColor: COLOR_BLACK,
+                color: COLOR_WHITE,
+                padding: "0.1rem 0.35rem",
+                borderRadius: "3px",
+                fontSize: "0.7rem",
+                fontWeight: "700",
+                transition: "all 0.15s ease-in-out",
+              }}>Ctrl + Shift + Enter</span>
             </button>
             <button
               onClick={handleRemoveHighlight}
@@ -1119,7 +1661,7 @@ export default function Home() {
                 }
               }}
             >
-              <span>挿入選択解除</span>
+              <span>部分解除</span>
               <span className="keycap" style={{
                 backgroundColor: COLOR_BLACK,
                 color: COLOR_WHITE,
@@ -1129,6 +1671,53 @@ export default function Home() {
                 fontWeight: "700",
                 transition: "all 0.15s ease-in-out",
               }}>Ctrl + -</span>
+            </button>
+            <button
+              onClick={handleDeleteHighlight}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                background: "transparent",
+                border: `1px solid ${COLOR_BLACK}`, // 枠線を細く
+                borderRadius: "4px",
+                padding: "0.3rem 0.8rem",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                fontSize: "0.85rem",
+                fontWeight: "700",
+                color: COLOR_BLACK,
+                transition: "all 0.15s ease-in-out",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = COLOR_BLACK;
+                e.currentTarget.style.color = COLOR_WHITE;
+                const keycap = e.currentTarget.querySelector(".keycap") as HTMLElement;
+                if (keycap) {
+                  keycap.style.backgroundColor = COLOR_WHITE;
+                  keycap.style.color = COLOR_BLACK;
+                }
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = "transparent";
+                e.currentTarget.style.color = COLOR_BLACK;
+                const keycap = e.currentTarget.querySelector(".keycap") as HTMLElement;
+                if (keycap) {
+                  keycap.style.backgroundColor = COLOR_BLACK;
+                  keycap.style.color = COLOR_WHITE;
+                }
+              }}
+            >
+              <span>タグ削除</span>
+              <span className="keycap" style={{
+                backgroundColor: COLOR_BLACK,
+                color: COLOR_WHITE,
+                padding: "0.1rem 0.35rem",
+                borderRadius: "3px",
+                fontSize: "0.7rem",
+                fontWeight: "700",
+                transition: "all 0.15s ease-in-out",
+              }}>Ctrl + Shift + -</span>
             </button>
           </div>
         </header>
