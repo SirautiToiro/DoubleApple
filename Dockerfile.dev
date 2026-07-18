@@ -1,0 +1,18 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# 依存関係定義のコピー
+COPY package.json package-lock.json ./
+
+# 依存関係のインストール
+RUN npm ci
+
+# ソースコードのコピー
+COPY . .
+
+# ポートの公開
+EXPOSE 3000
+
+# 開発サーバーの起動
+CMD ["npm", "run", "dev"]

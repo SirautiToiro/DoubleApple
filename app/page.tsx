@@ -3,6 +3,7 @@ import React, { useState, useMemo, useCallback, useEffect, useRef } from "react"
 import Image from "next/image";
 import { createEditor, BaseEditor, Element, Descendant, Editor, Transforms, Range, Text, Node, NodeEntry, Path, Point } from "slate";
 import { Slate, Editable, withReact, ReactEditor, RenderElementProps, RenderLeafProps } from "slate-react";
+import { withHistory, HistoryEditor } from "slate-history";
 import { initHighlightManager, highlightManager } from "./higilightManager";
 import { Leaf, HighlightElement, CodeElement, IsSameElement } from "./elements";
 import { Mode, ModeContext } from "./modeContext";
@@ -392,7 +393,7 @@ export default function Home() {
   }, [mode]);
 
   const editorLeft = useMemo(() => {
-    const editor = withReact(createEditor());
+    const editor = withHistory(withReact(createEditor()));
     const { isInline, normalizeNode } = editor;
     editor.isInline = (element: any) => {
       return element.type === "inline" ? true : isInline(element);
@@ -408,7 +409,7 @@ export default function Home() {
   }, [importKey]);
 
   const editorRight = useMemo(() => {
-    const editor = withReact(createEditor());
+    const editor = withHistory(withReact(createEditor()));
     const { isInline, normalizeNode } = editor;
     editor.isInline = (element: any) => {
       return element.type === "inline" ? true : isInline(element);
@@ -557,9 +558,9 @@ export default function Home() {
       const lines = text.split(/\r?\n/);
       const newValue: Descendant[] = lines.length > 0 && (lines.length > 1 || lines[0] !== "")
         ? lines.map((line) => ({
-            type: "block",
-            children: [{ text: line }],
-          }))
+          type: "block",
+          children: [{ text: line }],
+        }))
         : [{ type: "block", children: [{ text: "" }] }];
 
       if (target === "left") {
@@ -1072,12 +1073,35 @@ export default function Home() {
 
   // キー入力ハンドラー
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>, editor: ReactEditor & BaseEditor) => {
+    const isCmdOrCtrl = event.metaKey || event.ctrlKey;
+
+    // Ctrl+Z: アンドゥ (Undo)
+    if (isCmdOrCtrl && (event.key === "z" || event.key === "Z")) {
+      event.preventDefault();
+      try {
+        HistoryEditor.undo(editor as any);
+      } catch (e) {
+        console.error("Undo failed:", e);
+      }
+      return;
+    }
+
+    // Ctrl+Y: リドゥ (Redo)
+    if (isCmdOrCtrl && (event.key === "y" || event.key === "Y")) {
+      event.preventDefault();
+      try {
+        HistoryEditor.redo(editor as any);
+      } catch (e) {
+        console.error("Redo failed:", e);
+      }
+      return;
+    }
+
     if (mode !== "edit") {
       const allowedKeys = [
         "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
         "Home", "End", "PageUp", "PageDown",
       ];
-      const isCmdOrCtrl = event.metaKey || event.ctrlKey;
 
       // Ctrl+C などのコピー操作は許可
       if (isCmdOrCtrl && (event.key === "c" || event.key === "C")) {
