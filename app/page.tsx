@@ -7,6 +7,14 @@ import { withHistory, HistoryEditor } from "slate-history";
 import { initHighlightManager, highlightManager } from "./higilightManager";
 import { Leaf, HighlightElement, CodeElement, IsSameElement } from "./elements";
 import { Mode, ModeContext } from "./modeContext";
+import {
+  FILE_FORMAT_NAME,
+  FILE_FORMAT_VERSION,
+  FILE_EXTENSION,
+  FILE_DESCRIPTION,
+  FILE_MIME_TYPE,
+  FILE_PREFIX,
+} from "./constants";
 export interface Theme {
   black: string;
   white: string;
@@ -429,8 +437,8 @@ export default function Home() {
 
   const handleExport = useCallback(async () => {
     const exportData = {
-      format: "DoubleApple",
-      version: "1.0",
+      format: FILE_FORMAT_NAME,
+      version: FILE_FORMAT_VERSION,
       editorLeft: editorLeft.children,
       editorRight: editorRight.children,
     };
@@ -438,11 +446,11 @@ export default function Home() {
     if (typeof window !== "undefined" && "showSaveFilePicker" in window) {
       try {
         const handle = await (window as any).showSaveFilePicker({
-          suggestedName: `doubleapple_backup_${Date.now()}.dapl`,
+          suggestedName: `${FILE_PREFIX}${Date.now()}${FILE_EXTENSION}`,
           types: [{
-            description: "DoubleApple Backup File",
+            description: FILE_DESCRIPTION,
             accept: {
-              "application/json": [".dapl"],
+              [FILE_MIME_TYPE]: [FILE_EXTENSION],
             },
           }],
         });
@@ -458,11 +466,11 @@ export default function Home() {
       }
     } else {
       // フォールバック
-      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: FILE_MIME_TYPE });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `doubleapple_backup_${Date.now()}.dapl`;
+      a.download = `${FILE_PREFIX}${Date.now()}${FILE_EXTENSION}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -479,8 +487,8 @@ export default function Home() {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    if (!file.name.endsWith(".dapl")) {
-      showToast("拡張子が .dapl のファイルを選択してください");
+    if (!file.name.endsWith(FILE_EXTENSION)) {
+      showToast(`拡張子が ${FILE_EXTENSION} のファイルを選択してください`);
       return;
     }
 
@@ -489,7 +497,7 @@ export default function Home() {
       try {
         const data = JSON.parse(e.target?.result as string);
 
-        if (data.format !== "DoubleApple") {
+        if (data.format !== FILE_FORMAT_NAME) {
           showToast("無効なファイル形式です");
           return;
         }
@@ -693,16 +701,30 @@ export default function Home() {
           // 3. パス自動追従のために PathRef の配列を作成
           const pathRefs = paths.map((p) => Editor.pathRef(editor, p));
 
+          // 指定したパスの祖先から、最も深い（子に近い）hovertag: number のインラインノードを取得する
+          const getDeepestTarget = (atPath: Path) => {
+            let deepest: Node | null = null;
+            for (const [node] of Node.ancestors(editor, atPath)) {
+              if (Element.isElement(node) && editor.isInline(node) && typeof (node as any).hovertag === "number") {
+                deepest = node;
+              }
+            }
+            return deepest;
+          };
+
           // 4. 各パスに対してトリミングを適用
           for (const ref of pathRefs) {
             let currentPath = ref.current;
             if (!currentPath) continue;
 
+            // 解除対象の親タグが存在しない場合は処理をスキップ（ルートノード分割によるクラッシュを防止）
+            if (!getDeepestTarget(currentPath)) continue;
+
             // 4a. 終了位置で分割
             const endPoint = Editor.end(editor, currentPath);
             Transforms.splitNodes(editor, {
               at: endPoint,
-              match: (n) => Element.isElement(n) && editor.isInline(n) && typeof (n as any).hovertag === "number",
+              match: (n) => n === getDeepestTarget(endPoint.path),
               always: false,
             });
 
@@ -714,7 +736,7 @@ export default function Home() {
             const startPoint = Editor.start(editor, currentPath);
             Transforms.splitNodes(editor, {
               at: startPoint,
-              match: (n) => Element.isElement(n) && editor.isInline(n) && typeof (n as any).hovertag === "number",
+              match: (n) => n === getDeepestTarget(startPoint.path),
               always: false,
             });
 
@@ -722,16 +744,16 @@ export default function Home() {
             currentPath = ref.current;
             if (!currentPath) continue;
 
-            // 4c. 隔離されたテキストノードの祖先にある hovertag: number のインラインノードの hovertag を null に設定
-            const ancestorPaths: Path[] = [];
-            for (const [node, ancestorPath] of Node.ancestors(editor, currentPath)) {
+            // 4c. 隔離されたテキストノードの祖先から、最も深い（子に近い）解除対象タグのパスを特定して解除
+            let deepestPath: Path | null = null;
+            for (const [_, ancestorPath] of Node.ancestors(editor, currentPath)) {
+              const node = Node.get(editor, ancestorPath);
               if (Element.isElement(node) && editor.isInline(node) && typeof (node as any).hovertag === "number") {
-                ancestorPaths.push(ancestorPath);
+                deepestPath = ancestorPath;
               }
             }
-            // 親に近い順から null 化されるように逆順で適用
-            for (const aPath of [...ancestorPaths].reverse()) {
-              Transforms.setNodes(editor, { hovertag: null } as any, { at: aPath });
+            if (deepestPath) {
+              Transforms.setNodes(editor, { hovertag: null } as any, { at: deepestPath });
             }
 
             // 4d. テキストノードから insertHighlight マークを解除
